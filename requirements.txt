@@ -1,0 +1,23 @@
+# Core deep learning
+torch>=2.5
+
+# HuggingFace ecosystem (datasets, models, tokenizers)
+transformers
+tokenizers
+datasets
+accelerate
+huggingface-hub
+
+# Experiment tracking + config
+wandb
+pyyaml
+
+# Numerics + utilities
+einops
+
+# Notebooks + plotting
+jupyterlab
+matplotlib
+
+# Note: per-module dependencies (e.g. trl for DPO/GRPO, peft for LoRA)
+# will be added as we introduce them in later modules.
