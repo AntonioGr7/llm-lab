@@ -1,17 +1,21 @@
 """The Module 11 pretraining entrypoint. Launch via `torchrun`.
 
 ```
-# Single GPU (still goes through torchrun)
-torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo.yaml
+# Single A100 (still goes through torchrun)
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo_a100.yaml
+
+# Single H100 — use the H100-tuned config + --gpu=H100 for accurate MFU
+torchrun --standalone --nproc_per_node=1 train.py \\
+    --config=configs/demo_h100.yaml --gpu=H100
 
 # Single node, 8 GPUs — same config, adjust grad_accum to keep tokens/step constant
 torchrun --standalone --nproc_per_node=8 train.py \\
-    --config=configs/demo.yaml --training.grad_accum=1
+    --config=configs/demo_a100.yaml --training.grad_accum=1
 
 # Multi-node — 4 nodes x 8 GPUs
 torchrun --nnodes=4 --nproc_per_node=8 \\
     --rdzv_backend=c10d --rdzv_endpoint=node-0:29500 \\
-    train.py --config=configs/demo.yaml --training.grad_accum=1
+    train.py --config=configs/demo_a100.yaml --training.grad_accum=1
 ```
 
 The composition:
@@ -60,13 +64,15 @@ def _parse_args(argv):
         epilog=(
             "Examples:\n"
             "  torchrun --standalone --nproc_per_node=1 train.py "
-            "--config=configs/demo.yaml\n"
-            "  torchrun ... train.py --config=configs/demo.yaml "
+            "--config=configs/demo_a100.yaml\n"
+            "  torchrun --standalone --nproc_per_node=1 train.py "
+            "--config=configs/demo_h100.yaml --gpu=H100\n"
+            "  torchrun ... train.py --config=configs/demo_a100.yaml "
             "--training.total_steps=100 --training.grad_accum=1\n"
         ),
     )
     p.add_argument("--config", type=str, default=None,
-                   help="YAML config path (e.g. configs/demo.yaml)")
+                   help="YAML config path (e.g. configs/demo_a100.yaml or configs/demo_h100.yaml)")
     p.add_argument("--gpu", type=str, default="A100",
                    choices=list(_GPU_PEAK_TFLOPS.keys()),
                    help="GPU class for MFU calculation (default: A100)")

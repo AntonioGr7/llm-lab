@@ -10,8 +10,9 @@ Also adds FineWeb-Edu-specific knobs to `DataConfig` (tokenizer_name,
 fineweb_subset, shuffle_buffer, pin_memory).
 
 This file is the single source of truth for every hyperparameter the demo
-run takes. `configs/demo.yaml` is the materialized form for the demo;
-CLI overrides on top of that go through dotted paths (see `train.py`).
+run takes. `configs/demo_a100.yaml` (or `configs/demo_h100.yaml`) is the
+materialized form for the demo; CLI overrides on top of that go through
+dotted paths (see `train.py`).
 """
 from __future__ import annotations
 

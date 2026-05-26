@@ -1,4 +1,4 @@
-# Module 11 — Pretraining in Practice — the canonical demo config.
+# Module 11 — Pretraining in Practice — the canonical demo config for A100.
 #
 # 150M-param Qwen3-shape trained on ~3B tokens of FineWeb-Edu (sample-10BT).
 # Chinchilla-optimal at 20:1. Fits on a single A100-80GB with activation
@@ -8,6 +8,10 @@
 # Expected wallclock on a single A100-80GB: ~6–10 hours.
 # Expected cost on RunPod / Lambda: ~$15–25.
 # Expected final perplexity on a FineWeb-Edu validation slice: 15–22.
+#
+# Running on H100-80GB? Use `configs/demo_h100.yaml` instead — same model and
+# token budget, but tuned for H100's larger headroom and ~3× BF16 throughput
+# (bigger micro-batch, activation checkpointing off, ~1.5–3h wallclock).
 
 model:
   vocab_size: 151936       # Qwen3 tokenizer

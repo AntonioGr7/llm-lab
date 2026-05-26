@@ -1,0 +1,95 @@
+# Module 11 — Pretraining in Practice — H100-tuned variant of the demo.
+#
+# Identical model and token budget as `configs/demo_a100.yaml`:
+#   - 150M-param Qwen3 shape, 3000 steps × ~1.05M tokens/step ≈ 3.15B tokens.
+#   - Same Chinchilla-optimal training run, same final loss to within noise.
+#
+# What changed for H100-80GB (vs the A100 demo):
+#
+#   1. `training.activation_checkpointing: false`
+#         H100-80GB has more than enough memory for the 150M shape at this
+#         micro-batch. Activation checkpointing was a ~33% FLOP tax we paid
+#         on A100 to fit; turning it off here recovers that wallclock.
+#
+#   2. `data.batch_size_per_device: 32` (was 8) + `training.grad_accum: 16`
+#         (was 64). Tokens/step stays the same (32 × 16 × 2048 ≈ 1.05M on
+#         1 GPU), but each optimizer step issues 4× fewer micro-batches —
+#         fewer kernel launches, better tensor-core occupancy.
+#
+#         If you have headroom on first run (peak HBM well under 60 GB),
+#         bump to bs=64 + grad_accum=8 for another bump in throughput.
+#         If you OOM at 32, fall back to bs=16 + grad_accum=32.
+#
+#   3. `dtype: bf16` — unchanged. FP8 on H100 needs Transformer Engine
+#         (te.Linear inside the Qwen3 decoder + te.fp8_autocast in the loop)
+#         which isn't wired in this module. See README §11 stretch goals.
+#
+# Launch:
+#   torchrun --standalone --nproc_per_node=1 train.py \
+#       --config=configs/demo_h100.yaml --gpu=H100
+#
+# Expected wallclock on a single H100-80GB: ~1.5–3 hours.
+# Expected cost on RunPod (H100 ~$2–3/hr): ~$5–10.
+# Expected final perplexity on a FineWeb-Edu validation slice: 15–22 (same).
+
+model:
+  vocab_size: 151936       # Qwen3 tokenizer
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 2            # GQA(6x)
+  d_ffn: 2048              # ~2.67x d_model
+  max_seq: 2048
+  rope_theta: 10000.0
+  tie_weights: true
+  norm_eps: 1.0e-6
+
+optimizer:
+  type: adamw
+  lr: 3.0e-4               # peak; the schedule below shapes it over time
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+schedule:
+  type: cosine
+  warmup_steps: 200        # ~7% of total_steps — generous for a short run
+  min_lr_ratio: 0.1        # cosine floor at 10% of peak LR
+
+data:
+  source: fineweb_edu      # set to 'synthetic' for offline smoke tests
+  seq_len: 2048
+  batch_size_per_device: 32  # 4x A100 demo — H100 has the memory for it
+  num_workers: 2
+  pin_memory: true
+  tokenizer_name: Qwen/Qwen3-0.6B
+  fineweb_subset: sample-10BT
+  shuffle_buffer: 10000
+
+training:
+  # tokens/step = batch * grad_accum * world_size * seq_len
+  #             = 32 * 16 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
+  #             = 32 *  2 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=2)
+  # × 3000 steps ≈ 3.15B tokens  →  same ~15:1 ratio as the A100 demo.
+  total_steps: 3000
+  grad_accum: 16           # set to 2 on an 8-GPU node (keeps tokens/step constant)
+  grad_clip: 1.0           # the LLM-canonical clip threshold
+  dtype: bf16              # FP8 would need Transformer Engine wiring (README §11)
+  activation_checkpointing: false  # H100 has the memory — recover the ~33% FLOP tax
+  log_every: 10
+  save_every: 500
+  eval_every: 0            # set to e.g. 500 to run validation perplexity mid-training
+  checkpoint_dir: ./results/checkpoints
+  # Disk hygiene: keep only the 3 most recent rolling checkpoints, plus a
+  # permanent snapshot every 1000 steps. At 6 checkpoints saved over 3000
+  # steps that leaves at most 4 directories on disk (3 rolling + step_3000).
+  # See "Managing disk" in README §11.
+  keep_last_n_checkpoints: 3
+  milestone_every: 1000
+  # Weights & Biases (rank-0 only). See "Logging to W&B" in README §6.
+  # Setup: `pip install wandb` then `wandb login` once (or export WANDB_API_KEY=...).
+  wandb_project: ""        # e.g. "llm-lab-pretrain" — empty disables W&B entirely
+  wandb_entity: ""         # your wandb username or team slug; "" = your default
+  wandb_run_name: ""       # "" lets W&B auto-name; useful when scanning many runs
+  wandb_run_id: ""         # set to a previous run's id to RESUME that run on restart
+  wandb_tags: []           # e.g. ["demo", "fineweb-edu", "150M", "h100"]

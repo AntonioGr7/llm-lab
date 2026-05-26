@@ -42,7 +42,8 @@ Everything below tells you how to actually run this, what to monitor while it's 
   train.py           # the entrypoint you launch with torchrun
   eval.py            # perplexity + a small generation sanity check
   configs/
-    demo.yaml        # the 150M / 3B-token demo config
+    demo_a100.yaml   # the 150M / 3B-token demo config — A100-80GB baseline
+    demo_h100.yaml   # same run, tuned for H100-80GB (bigger batch, no AC)
   notebook.ipynb     # narrative walkthrough on CPU
   results/           # pre-run loss curve + checkpoint (committed)
 ```
@@ -153,7 +154,7 @@ Both configurations train the same model with the same effective batch — gradi
 
 ## 4. The training configuration
 
-[`configs/demo.yaml`](configs/demo.yaml) is the source of truth. Highlights:
+[`configs/demo_a100.yaml`](configs/demo_a100.yaml) is the source of truth for the A100 baseline; [`configs/demo_h100.yaml`](configs/demo_h100.yaml) is the H100-tuned twin (same model and token budget, just sized for H100's headroom — see §5 for the launch and §11 for the diff). Highlights of the A100 baseline:
 
 ```yaml
 model:
@@ -202,10 +203,23 @@ The YAML maps 1:1 onto [`config.py`](config.py)'s `TrainConfig` dataclass. `trai
 
 ```bash
 cd part-3-pretraining/11-pretraining-in-practice/
-torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo.yaml
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo_a100.yaml
 ```
 
 Expected wallclock: **~6–10 hours** on A100-80GB at ~25% MFU. Cost on RunPod/Lambda: ~$15–25.
+
+### Single H100 (same run, faster)
+
+If your provider offers H100-80GB, use the H100-tuned config — same model and token budget, but with activation checkpointing off and a 4× larger micro-batch to actually feed the H100's tensor cores:
+
+```bash
+torchrun --standalone --nproc_per_node=1 train.py \
+    --config=configs/demo_h100.yaml --gpu=H100
+```
+
+Expected wallclock: **~1.5–3 hours** on H100-80GB at ~35–50% MFU. Cost on RunPod (~$2–3/hr for H100): ~$5–10. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
+
+The diff against the A100 demo is exactly three fields (`batch_size_per_device`, `grad_accum`, `activation_checkpointing`); the rationale is in the header of [`configs/demo_h100.yaml`](configs/demo_h100.yaml). FP8 on H100 is another lever — ~40% on top of BF16 — but needs Transformer Engine wiring in `model.py` that isn't included here; it's listed under stretch goals in §11.
 
 ### 8×A100 node — same config, ~8× faster
 
@@ -213,11 +227,11 @@ The same config with `--nproc_per_node=8` and `grad_accum` cut 8×:
 
 ```bash
 torchrun --standalone --nproc_per_node=8 \
-    train.py --config=configs/demo.yaml \
+    train.py --config=configs/demo_a100.yaml \
     --training.grad_accum=8
 ```
 
-Tokens-per-step are preserved (1M either way), but each step's micro-batches run in parallel across ranks instead of sequentially. Finishes in ~45–90 minutes. Same effective batch size, same loss curve to within noise.
+Tokens-per-step are preserved (1M either way), but each step's micro-batches run in parallel across ranks instead of sequentially. Finishes in ~45–90 minutes. Same effective batch size, same loss curve to within noise. (On 8×H100, use `demo_h100.yaml` with `--training.grad_accum=2` for the same reason.)
 
 ### Multi-node — 4 × 8 GPUs
 
@@ -225,7 +239,7 @@ Tokens-per-step are preserved (1M either way), but each step's micro-batches run
 # On every node:
 torchrun --nnodes=4 --nproc_per_node=8 \
     --rdzv_backend=c10d --rdzv_endpoint=node-0:29500 \
-    train.py --config=configs/demo.yaml \
+    train.py --config=configs/demo_a100.yaml \
     --training.grad_accum=1     # 32 GPUs × bs 8 × 1 × 2048 ≈ 524k tokens/step;
                                 # halve total_steps if you want to keep tokens fixed
 ```
@@ -238,7 +252,7 @@ For development:
 
 ```bash
 torchrun --standalone --nproc_per_node=1 train.py \
-    --config=configs/demo.yaml \
+    --config=configs/demo_a100.yaml \
     --data.source=synthetic \
     --training.total_steps=10 \
     --training.activation_checkpointing=false \
@@ -265,7 +279,7 @@ wandb login           # interactive — paste your API key from https://wandb.ai
 export WANDB_API_KEY=...
 ```
 
-**2. Set the project in your config.** Edit `configs/demo.yaml` (or pass on the CLI):
+**2. Set the project in your config.** Edit your demo YAML (`configs/demo_a100.yaml` or `configs/demo_h100.yaml`) or pass on the CLI:
 
 ```yaml
 training:
@@ -278,7 +292,7 @@ training:
 Or override at launch:
 
 ```bash
-torchrun ... train.py --config=configs/demo.yaml \
+torchrun ... train.py --config=configs/demo_a100.yaml \
     --training.wandb_project=llm-lab-pretrain \
     --training.wandb_run_name=150M-fineweb-demo
 ```
@@ -288,7 +302,7 @@ torchrun ... train.py --config=configs/demo.yaml \
 **Resuming a W&B run after a crash / restart.** Set `wandb_run_id` to the previous run's id (visible in its URL and in `wandb_run.id` on the run page). `train.py` passes `resume="allow"` so the new process appends to the same run instead of starting a fresh one:
 
 ```bash
-torchrun ... train.py --config=configs/demo.yaml \
+torchrun ... train.py --config=configs/demo_a100.yaml \
     --training.resume_from=./results/checkpoints/step_00002000 \
     --training.wandb_run_id=abc12def         # the existing run's id
 ```
@@ -353,7 +367,7 @@ loss
 **Repeated spikes**: LR is too high for the current regime, or the data is consistently nasty. Grad norm stays high (>5) between spikes. **Action: rollback to the last clean checkpoint, reduce LR by ~30%, resume.** The framework supports this:
 
 ```bash
-torchrun ... train.py --config=configs/demo.yaml \
+torchrun ... train.py --config=configs/demo_a100.yaml \
     --training.resume_from=./results/checkpoints/step_00002000 \
     --optimizer.lr=2.0e-4
 ```
@@ -379,7 +393,7 @@ Resuming on a **different cluster shape** works because DCP re-shards on load:
 ```bash
 # Trained on 8 GPUs, resume on 4:
 torchrun --standalone --nproc_per_node=4 train.py \
-    --config=configs/demo.yaml \
+    --config=configs/demo_a100.yaml \
     --training.resume_from=./results/checkpoints/step_00001500
 ```
 
@@ -477,7 +491,7 @@ If the output is gibberish, something is wrong even if perplexity looks fine.
 
 ## 10. Scaling up — 150M → 1B → 7B → 70B
 
-Everything in this directory is sized for 150M, but **nothing in the code assumes it**. To train a 1B model, edit `configs/demo.yaml`:
+Everything in this directory is sized for 150M, but **nothing in the code assumes it**. To train a 1B model, copy `configs/demo_a100.yaml` (or `demo_h100.yaml`) and edit:
 
 ```yaml
 model:

@@ -15,7 +15,7 @@ Three signals, none of them sufficient on their own:
 Usage:
 
     python eval.py --checkpoint=./results/checkpoints/step_00003000 \
-                   --config=configs/demo.yaml \
+                   --config=configs/demo_a100.yaml \
                    --slice=valid              # perplexity
     python eval.py --checkpoint=... --generate # generation samples
     python eval.py --harness                   # lm-eval-harness command print
@@ -179,7 +179,7 @@ Anything noticeably below those bands suggests undertraining or a tokenizer mism
 
 def _parse_args():
     p = argparse.ArgumentParser(description="Eval the Module 11 demo checkpoint")
-    p.add_argument("--config", type=str, default="configs/demo.yaml")
+    p.add_argument("--config", type=str, default="configs/demo_a100.yaml")
     p.add_argument("--checkpoint", type=str, default=None,
                    help="path to a DCP or single-process checkpoint directory")
     p.add_argument("--slice", type=str, default=None, choices=["valid"],
