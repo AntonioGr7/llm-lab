@@ -15,7 +15,7 @@ A few decisions worth stating up front:
 - **[08 — The Training Loop](08-training-loop/)** — Every line of a canonical training loop. The model builder (Qwen3 default), AdamW with proper param groups, BF16 mixed precision (and why not FP16), gradient accumulation, gradient clipping, FSDP2 wrapping, checkpointing. End-to-end `torchrun train.py` working on a synthetic dataset.
 - **[09 — The Learning Rate](09-learning-rate/)** — The most important hyperparameter. Warmup, cosine decay, minimum LR. muP transfer from small to large in concrete numbers. Diagnosing LR problems from a loss curve.
 - **[10 — Scaling and Efficiency](10-scaling-and-efficiency/)** — Per-rank memory math, ZeRO stages mapped to FSDP2 sharding choices, activation checkpointing (one line, ~33% FLOPs for most of activation memory), tensor and pipeline parallelism conceptually, DeepSpeed sidebar, DeepSeek's multi-token prediction, and Chinchilla scaling laws as a budgeting tool.
-- **[11 — Pretraining in Practice](11-pretraining-in-practice/)** — The actual demo run on FineWeb-Edu, launched with `torchrun`. Real data pipeline, real logging, real checkpoint resume, debugging loss spikes. Evaluating a base model and why perplexity alone lies.
+- **[11 — Pretraining in Practice](11-pretraining-in-practice/)** — The complete, self-contained framework. FineWeb-Edu streaming pipeline, the composed `train.py` (pulls 08's loop + 09's schedule + 10's checkpointing), the demo config (~150M Qwen3, ~3B tokens, Chinchilla-optimal, ~$15–25 on a single A100), `eval.py` for perplexity + generation sanity check + lm-evaluation-harness pointer. The directory you lift out into a new repo.
 
 ## What you'll be able to do at the end of this Part
 

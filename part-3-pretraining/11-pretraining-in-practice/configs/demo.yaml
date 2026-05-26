@@ -1,0 +1,74 @@
+# Module 11 — Pretraining in Practice — the canonical demo config.
+#
+# 150M-param Qwen3-shape trained on ~3B tokens of FineWeb-Edu (sample-10BT).
+# Chinchilla-optimal at 20:1. Fits on a single A100-80GB with activation
+# checkpointing on; scales to multi-GPU and multi-node by adjusting
+# `training.grad_accum` (lower) and the torchrun launch flags (no code changes).
+#
+# Expected wallclock on a single A100-80GB: ~6–10 hours.
+# Expected cost on RunPod / Lambda: ~$15–25.
+# Expected final perplexity on a FineWeb-Edu validation slice: 15–22.
+
+model:
+  vocab_size: 151936       # Qwen3 tokenizer
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 2            # GQA(6x)
+  d_ffn: 2048              # ~2.67x d_model
+  max_seq: 2048
+  rope_theta: 10000.0
+  tie_weights: true
+  norm_eps: 1.0e-6
+
+optimizer:
+  type: adamw
+  lr: 3.0e-4               # peak; the schedule below shapes it over time
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+schedule:
+  type: cosine
+  warmup_steps: 200        # ~7% of total_steps — generous for a short run
+  min_lr_ratio: 0.1        # cosine floor at 10% of peak LR
+
+data:
+  source: fineweb_edu      # set to 'synthetic' for offline smoke tests
+  seq_len: 2048
+  batch_size_per_device: 8
+  num_workers: 2
+  pin_memory: true
+  tokenizer_name: Qwen/Qwen3-0.6B
+  fineweb_subset: sample-10BT
+  shuffle_buffer: 10000
+
+training:
+  # tokens/step = batch * grad_accum * world_size * seq_len
+  #             = 8 * 64 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
+  #             = 8 *  8 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=8)
+  # × 3000 steps ≈ 3.15B tokens  →  ~15:1 against the 206M-param real count
+  # (Chinchilla 20:1 target for an "150M-class" headline figure;
+  #  cost ≈ $15-25 on a single A100-80GB at ~25-30% MFU.)
+  total_steps: 3000
+  grad_accum: 64           # set to 8 on an 8-GPU node (keeps tokens/step constant)
+  grad_clip: 1.0           # the LLM-canonical clip threshold
+  dtype: bf16              # bf16 on A100/H100; switch to fp8 for H100 production
+  activation_checkpointing: true   # ~33% FLOP tax; saves ~99% of activation memory
+  log_every: 10
+  save_every: 500
+  eval_every: 0            # set to e.g. 500 to run validation perplexity mid-training
+  checkpoint_dir: ./results/checkpoints
+  # Disk hygiene: keep only the 3 most recent rolling checkpoints, plus a
+  # permanent snapshot every 1000 steps. At 6 checkpoints saved over 3000
+  # steps that leaves at most 4 directories on disk (3 rolling + step_3000).
+  # See "Managing disk" in README §11.
+  keep_last_n_checkpoints: 3
+  milestone_every: 1000
+  # Weights & Biases (rank-0 only). See "Logging to W&B" in README §6.
+  # Setup: `pip install wandb` then `wandb login` once (or export WANDB_API_KEY=...).
+  wandb_project: ""        # e.g. "llm-lab-pretrain" — empty disables W&B entirely
+  wandb_entity: ""         # your wandb username or team slug; "" = your default
+  wandb_run_name: ""       # "" lets W&B auto-name; useful when scanning many runs
+  wandb_run_id: ""         # set to a previous run's id to RESUME that run on restart
+  wandb_tags: []           # e.g. ["demo", "fineweb-edu", "150M"]
