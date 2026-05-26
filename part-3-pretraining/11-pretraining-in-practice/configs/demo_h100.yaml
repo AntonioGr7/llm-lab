@@ -7,18 +7,25 @@
 # What changed for H100-80GB (vs the A100 demo):
 #
 #   1. `training.activation_checkpointing: false`
-#         H100-80GB has more than enough memory for the 150M shape at this
-#         micro-batch. Activation checkpointing was a ~33% FLOP tax we paid
-#         on A100 to fit; turning it off here recovers that wallclock.
+#         H100 has enough memory to drop the AC tax at the A100 micro-batch.
+#         AC was a ~33% FLOP tax we paid on A100 to fit; turning it off here
+#         recovers that wallclock. **This is the H100 win.**
 #
-#   2. `data.batch_size_per_device: 32` (was 8) + `training.grad_accum: 16`
-#         (was 64). Tokens/step stays the same (32 × 16 × 2048 ≈ 1.05M on
-#         1 GPU), but each optimizer step issues 4× fewer micro-batches —
-#         fewer kernel launches, better tensor-core occupancy.
+#   2. Micro-batch unchanged (bs=8, grad_accum=64) — same tokens/step.
+#         Counter-intuitive at first: H100 has 80 GB just like A100-80GB,
+#         so why not push bs higher? Because at this model size the
+#         binding memory constraint is **not** activations or weights — it's
+#         the `B · S · V` logits tensor and the FP32 cross-entropy intermediates.
 #
-#         If you have headroom on first run (peak HBM well under 60 GB),
-#         bump to bs=64 + grad_accum=8 for another bump in throughput.
-#         If you OOM at 32, fall back to bs=16 + grad_accum=32.
+#         At vocab=151,936, seq=2048, the CE step alone wants:
+#           bs=8:   ~25 GB peak (fits, ~40 GB total → safe)
+#           bs=16:  ~50 GB peak (tight, OOMs with fragmentation)
+#           bs=32:  ~100 GB peak (instant OOM)
+#
+#         The 150M parameters are dwarfed by the CE step. To actually use
+#         a larger micro-batch here you'd need chunked CE or a Liger fused
+#         CE kernel — out of scope for this module, see README stretch goals.
+#         For ≥1B models the math flips and large micro-batches do pay off.
 #
 #   3. `dtype: bf16` — unchanged. FP8 on H100 needs Transformer Engine
 #         (te.Linear inside the Qwen3 decoder + te.fp8_autocast in the loop)
@@ -59,7 +66,7 @@ schedule:
 data:
   source: fineweb_edu      # set to 'synthetic' for offline smoke tests
   seq_len: 2048
-  batch_size_per_device: 32  # 4x A100 demo — H100 has the memory for it
+  batch_size_per_device: 8   # CE-bound at vocab=151,936 — see comment block above
   num_workers: 2
   pin_memory: true
   tokenizer_name: Qwen/Qwen3-0.6B
@@ -68,11 +75,11 @@ data:
 
 training:
   # tokens/step = batch * grad_accum * world_size * seq_len
-  #             = 32 * 16 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
-  #             = 32 *  2 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=2)
+  #             = 8 * 64 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
+  #             = 8 *  8 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=8)
   # × 3000 steps ≈ 3.15B tokens  →  same ~15:1 ratio as the A100 demo.
   total_steps: 3000
-  grad_accum: 16           # set to 2 on an 8-GPU node (keeps tokens/step constant)
+  grad_accum: 64           # set to 8 on an 8-GPU node (keeps tokens/step constant)
   grad_clip: 1.0           # the LLM-canonical clip threshold
   dtype: bf16              # FP8 would need Transformer Engine wiring (README §11)
   activation_checkpointing: false  # H100 has the memory — recover the ~33% FLOP tax

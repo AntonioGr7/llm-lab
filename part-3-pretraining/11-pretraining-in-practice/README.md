@@ -210,7 +210,7 @@ Expected wallclock: **~6–10 hours** on A100-80GB at ~25% MFU. Cost on RunPod/L
 
 ### Single H100 (same run, faster)
 
-If your provider offers H100-80GB, use the H100-tuned config — same model and token budget, but with activation checkpointing off and a 4× larger micro-batch to actually feed the H100's tensor cores:
+If your provider offers H100-80GB, use the H100-tuned config — same model, same token budget, just with activation checkpointing turned off to recover the ~33% FLOP tax:
 
 ```bash
 torchrun --standalone --nproc_per_node=1 train.py \
@@ -219,7 +219,7 @@ torchrun --standalone --nproc_per_node=1 train.py \
 
 Expected wallclock: **~1.5–3 hours** on H100-80GB at ~35–50% MFU. Cost on RunPod (~$2–3/hr for H100): ~$5–10. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
 
-The diff against the A100 demo is exactly three fields (`batch_size_per_device`, `grad_accum`, `activation_checkpointing`); the rationale is in the header of [`configs/demo_h100.yaml`](configs/demo_h100.yaml). FP8 on H100 is another lever — ~40% on top of BF16 — but needs Transformer Engine wiring in `model.py` that isn't included here; it's listed under stretch goals in §11.
+The diff against the A100 demo is a single field (`activation_checkpointing: false`); the rationale is in the header of [`configs/demo_h100.yaml`](configs/demo_h100.yaml). You might expect a bigger micro-batch on H100 too, but at vocab=151,936 the `B·S·V` logits tensor and the FP32 cross-entropy intermediates dominate memory, not parameters or activations — so the H100's extra HBM is already spoken for by the CE step at bs=8. Pushing bs higher needs chunked CE or a Liger fused kernel (stretch goal). FP8 on H100 is another lever — ~40% on top of BF16 — but needs Transformer Engine wiring in `model.py` that isn't included here; also a stretch goal in §11.
 
 ### 8×A100 node — same config, ~8× faster
 
@@ -231,7 +231,7 @@ torchrun --standalone --nproc_per_node=8 \
     --training.grad_accum=8
 ```
 
-Tokens-per-step are preserved (1M either way), but each step's micro-batches run in parallel across ranks instead of sequentially. Finishes in ~45–90 minutes. Same effective batch size, same loss curve to within noise. (On 8×H100, use `demo_h100.yaml` with `--training.grad_accum=2` for the same reason.)
+Tokens-per-step are preserved (1M either way), but each step's micro-batches run in parallel across ranks instead of sequentially. Finishes in ~45–90 minutes. Same effective batch size, same loss curve to within noise. (On 8×H100, use `demo_h100.yaml` with `--training.grad_accum=8` for the same reason.)
 
 ### Multi-node — 4 × 8 GPUs
 
