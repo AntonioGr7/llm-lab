@@ -395,7 +395,27 @@ results/checkpoints/
     ...
 ```
 
-Resuming on a **different cluster shape** works because DCP re-shards on load:
+### What's inside a single `step_XXXXXXXX/` directory
+
+If you peek inside one of these folders, you won't find a single `model.bin` — you'll find two kinds of files, both required:
+
+```
+step_00000500/
+    .metadata           # the index: which tensor lives in which shard, and where
+    __0_0.distcp        # rank 0's shard of model + optimizer + RNG + step
+    __1_0.distcp        # rank 1's shard         ← only present if you trained on >1 GPU
+    __2_0.distcp        # ...
+    ...
+```
+
+- **`.metadata`** is the index. It lists every persisted tensor — `model.layers.0.attn.q_proj.weight`, `optimizer.state.0.exp_avg`, the integer `step`, the RNG blobs — together with their global shape, dtype, and a pointer to which `.distcp` file holds each slice.
+- **`__<rank>_<n>.distcp`** is a binary shard, one file per rank (the `_<n>` suffix is an internal chunk counter, almost always `_0` for our model sizes). The `0` in `__0_0.distcp` is the rank that wrote it.
+
+So a checkpoint saved on **1 GPU** is exactly `.metadata` + `__0_0.distcp` — that's the complete artifact, nothing is missing. On 8 GPUs it's `.metadata` + `__0_0.distcp` … `__7_0.distcp`. Step 500 of your demo run looking like just two files is the expected, healthy state.
+
+**Why this format instead of one big file.** Each rank writes its local shard straight to disk in parallel, no rank-0 bottleneck collecting weights first. For a 70B model the difference is a ~30-second save vs a ~30-minute one, and the latter blocks training. DCP also re-shards on load — the same checkpoint can rehydrate into a model with a *different* number of GPUs, which is what enables the resume-on-different-cluster-shape trick below.
+
+### Resuming on a different cluster shape
 
 ```bash
 # Trained on 8 GPUs, resume on 4:
@@ -472,6 +492,57 @@ Four directories, not six. Steps 500 and 1500 were rolled out.
 **Disabling milestones**: set `milestone_every: 0`. Then only the rolling window survives.
 
 **Sizing rule of thumb**: a checkpoint of an N-param model in BF16 with AdamW state ≈ `N × 16 bytes`. For 150M that's ~2.4 GB per checkpoint; for 70B it's ~1.1 TB. With `keep_last_n=3` and one milestone per ~5% of training, you cap disk at ~3.3× and ~3.3 TB respectively.
+
+### Pulling a checkpoint off the training box for local inference
+
+A common workflow: training runs on a rented GPU box, but you want to vibes-check the model — generate completions, poke around in a notebook, hand it to a teammate — from your laptop. The DCP format is fine for this; you just need to know two things.
+
+**1. Transfer the directory as a unit.** A DCP checkpoint *is* a directory — copy the whole `step_XXXXXXXX/` folder, not individual files:
+
+```bash
+# from your local machine
+rsync -avh --progress \
+  user@host:/.../11-pretraining-in-practice/results/checkpoints/step_00003000 \
+  ./results/checkpoints/
+```
+
+`scp -r ...` works too; `aws s3 sync` / `gsutil -m rsync -r` are noticeably faster when there are many small shard files (large multi-GPU runs).
+
+**2. Load it locally — two ways, and you need to pick one deliberately.** Look at [`checkpoint.py`](checkpoint.py)'s `load()` function: there's a `dist.is_initialized()` branch that reads the DCP shards via `dcp.load`, and a non-distributed branch that reads a single `state.pt` via `torch.load`. These are two **different on-disk formats** — running `python eval.py --checkpoint=step_00003000/` on a downloaded DCP folder falls into the non-distributed branch and errors on the missing `state.pt`. Pick one:
+
+**Option A — keep DCP, run eval under torchrun (1 process).** No conversion. The distributed branch handles single-rank fine; you're just borrowing `torchrun` to set up the process group.
+
+```bash
+torchrun --standalone --nproc_per_node=1 eval.py \
+    --checkpoint=./results/checkpoints/step_00003000 \
+    --config=configs/demo_a100.yaml \
+    --device=cpu --prompt="The capital of France is"
+```
+
+This is the path that requires zero extra steps if you've kept the full `11-pretraining-in-practice/` directory locally. Use `--device=cpu` if your laptop has no GPU; the 150M demo runs slowly but correctly on CPU.
+
+**Option B — convert DCP → `state.pt` once, then load with plain Python.** Better when you want to load the checkpoint in a notebook, hand a single file to someone else, or run on a machine where setting up `torchrun` is annoying. PyTorch ships the converter as a module:
+
+```bash
+python -m torch.distributed.checkpoint.format_utils dcp_to_torch_save \
+    ./results/checkpoints/step_00003000 \
+    ./results/checkpoints/step_00003000/state.pt
+```
+
+After that, `state.pt` lives alongside the `.distcp` shards (no conflict — `load()` only looks at `state.pt` in the non-distributed branch and only at the shards in the distributed branch). Then:
+
+```bash
+python eval.py \
+    --checkpoint=./results/checkpoints/step_00003000 \
+    --config=configs/demo_a100.yaml \
+    --device=cpu --prompt="The capital of France is"
+```
+
+just works — no `torchrun` needed.
+
+Both options produce **bit-identical** loaded weights; only the on-disk encoding differs. Option A is canonical (it's what the framework uses internally); Option B is the ergonomic choice for laptop play.
+
+**Sanity expectations for an early checkpoint.** If you're loading something from very early in training (e.g. step 500 of the 3000-step demo), the model has seen only ~3% of its token budget. Don't be alarmed if perplexity is in the hundreds and completions read as word-shaped but semantically incoherent. The honest vibes-check at that stage is "does it produce English tokens at all," not "does it know facts." Re-pull a later checkpoint (step 2000+) before judging the run.
 
 ## 9. Evaluating a base model
 

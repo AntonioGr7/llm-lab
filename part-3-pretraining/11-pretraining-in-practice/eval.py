@@ -17,8 +17,15 @@ Usage:
     python eval.py --checkpoint=./results/checkpoints/step_00003000 \
                    --config=configs/demo_a100.yaml \
                    --slice=valid              # perplexity
-    python eval.py --checkpoint=... --generate # generation samples
-    python eval.py --harness                   # lm-eval-harness command print
+    python eval.py --checkpoint=... --generate # canonical-prompt samples
+    python eval.py --checkpoint=... --prompt="The mitochondrion is"
+    python eval.py --checkpoint=... --interactive    # REPL
+    python eval.py --harness                         # lm-eval-harness command print
+
+To vibes-check a checkpoint while training is still running on the same box,
+pass `--device=cpu` so you don't fight the training job for VRAM:
+
+    python eval.py --checkpoint=... --interactive --device=cpu
 
 The checkpoint must have been saved by `train.py` (DCP or single-process).
 """
@@ -108,6 +115,31 @@ _CANONICAL_PROMPTS = [
 
 
 @torch.no_grad()
+def _generate_one(
+    model,
+    tok,
+    prompt: str,
+    max_new_tokens: int = 60,
+    temperature: float = 0.8,
+    top_k: int = 40,
+    device: str = "cuda",
+) -> str:
+    """Decode a single completion. Sampling is top-k + temperature."""
+    ids = tok(prompt, return_tensors="pt").input_ids.to(device)
+    for _ in range(max_new_tokens):
+        logits = model(input_ids=ids).logits[:, -1, :]   # (1, V)
+        logits = logits / max(temperature, 1e-6)
+        top_vals, top_idx = torch.topk(logits, k=top_k, dim=-1)
+        probs = torch.softmax(top_vals, dim=-1)
+        sampled = torch.multinomial(probs, num_samples=1)
+        next_id = top_idx.gather(-1, sampled)             # (1, 1)
+        ids = torch.cat([ids, next_id], dim=-1)
+        if next_id.item() == tok.eos_token_id:
+            break
+    return tok.decode(ids[0], skip_special_tokens=True)
+
+
+@torch.no_grad()
 def generate_samples(
     model,
     tokenizer_name: str,
@@ -130,23 +162,39 @@ def generate_samples(
     if prompts is None:
         prompts = _CANONICAL_PROMPTS
 
-    out = []
-    for prompt in prompts:
-        ids = tok(prompt, return_tensors="pt").input_ids.to(device)
-        for _ in range(max_new_tokens):
-            logits = model(input_ids=ids).logits[:, -1, :]   # (1, V)
-            logits = logits / max(temperature, 1e-6)
-            # Top-k filter
-            top_vals, top_idx = torch.topk(logits, k=top_k, dim=-1)
-            probs = torch.softmax(top_vals, dim=-1)
-            sampled = torch.multinomial(probs, num_samples=1)
-            next_id = top_idx.gather(-1, sampled)             # (1, 1)
-            ids = torch.cat([ids, next_id], dim=-1)
-            if next_id.item() == tok.eos_token_id:
-                break
-        completion = tok.decode(ids[0], skip_special_tokens=True)
-        out.append((prompt, completion))
-    return out
+    return [
+        (p, _generate_one(model, tok, p, max_new_tokens, temperature, top_k, device))
+        for p in prompts
+    ]
+
+
+def interactive_loop(
+    model,
+    tokenizer_name: str,
+    max_new_tokens: int = 120,
+    temperature: float = 0.8,
+    top_k: int = 40,
+    device: str = "cuda",
+) -> None:
+    """REPL: read a prompt from stdin, print a completion. Empty line or Ctrl-D to exit.
+
+    Useful for vibes-checking an intermediate checkpoint mid-training. Pair with
+    `--device=cpu` if the training job still owns the GPU.
+    """
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(tokenizer_name)
+    model.eval()
+
+    print("[eval] interactive mode — empty line or Ctrl-D to quit", flush=True)
+    while True:
+        try:
+            prompt = input("\n> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not prompt.strip():
+            return
+        print(_generate_one(model, tok, prompt, max_new_tokens, temperature, top_k, device))
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +236,14 @@ def _parse_args():
                    help="how many tokens to score (default 1M; bump to 5M for a stable number)")
     p.add_argument("--generate", action="store_true",
                    help="also print short completions for canonical prompts")
+    p.add_argument("--prompt", type=str, default=None,
+                   help="generate a completion for this single prompt (one-off vibes check)")
+    p.add_argument("--interactive", action="store_true",
+                   help="open a REPL: type a prompt, get a completion, repeat")
+    p.add_argument("--max_new_tokens", type=int, default=120,
+                   help="generation budget for --prompt / --interactive (default 120)")
+    p.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"],
+                   help="where to run; use 'cpu' to avoid VRAM contention with a running train job")
     p.add_argument("--harness", action="store_true",
                    help="print the lm-eval-harness command and exit")
     args, extra = p.parse_known_args()
@@ -215,7 +271,10 @@ def main():
     apply_dotted_overrides(cfg, overrides)
 
     rinfo = init_distributed()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
     if not rinfo.is_main:
         # For eval we typically run on a single rank; rank>0 can wait and exit.
         cleanup_distributed()
@@ -244,12 +303,35 @@ def main():
     if args.generate:
         print("[eval] generation samples ...", flush=True)
         out = generate_samples(
-            model, tokenizer_name=cfg.data.tokenizer_name, device=device,
+            model,
+            tokenizer_name=cfg.data.tokenizer_name,
+            max_new_tokens=args.max_new_tokens,
+            device=device,
         )
         for prompt, completion in out:
             print(f"\nPROMPT:     {prompt}")
             print(f"COMPLETION: {completion}")
         print()
+
+    if args.prompt is not None:
+        out = generate_samples(
+            model,
+            tokenizer_name=cfg.data.tokenizer_name,
+            prompts=[args.prompt],
+            max_new_tokens=args.max_new_tokens,
+            device=device,
+        )
+        prompt, completion = out[0]
+        print(f"\nPROMPT:     {prompt}")
+        print(f"COMPLETION: {completion}\n")
+
+    if args.interactive:
+        interactive_loop(
+            model,
+            tokenizer_name=cfg.data.tokenizer_name,
+            max_new_tokens=args.max_new_tokens,
+            device=device,
+        )
 
     cleanup_distributed()
 
