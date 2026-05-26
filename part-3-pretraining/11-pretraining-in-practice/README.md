@@ -212,16 +212,26 @@ Expected wallclock: **~6–10 hours** on A100-80GB at ~25% MFU. Cost on RunPod/L
 
 ### Single H100 (same run, faster)
 
-If your provider offers H100-80GB, use the H100-tuned config — same model, same token budget, just with activation checkpointing turned off to recover the ~33% FLOP tax:
+If your provider offers H100-80GB, use the H100-tuned config — same model, same token budget, but with activation checkpointing turned off (recovering the ~33% FLOP tax) and a 4× larger micro-batch unlocked by Liger Kernel's fused linear+CE:
 
 ```bash
+pip install liger-kernel      # one-time, required for use_fused_ce
 torchrun --standalone --nproc_per_node=1 train.py \
     --config=configs/demo_h100.yaml --gpu=H100
 ```
 
-Expected wallclock: **~1.5–3 hours** on H100-80GB at ~35–50% MFU. Cost on RunPod (~$2–3/hr for H100): ~$5–10. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
+Expected wallclock: **~1.2–2 hours** on H100-80GB at ~35–50% MFU. Cost on RunPod (~$2–3/hr for H100): ~$3–6. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
 
-The diff against the A100 demo is a single field (`activation_checkpointing: false`); the rationale is in the header of [`configs/demo_h100.yaml`](configs/demo_h100.yaml). You might expect a bigger micro-batch on H100 too, but at vocab=151,936 the `B·S·V` logits tensor and the FP32 cross-entropy intermediates dominate memory, not parameters or activations — so the H100's extra HBM is already spoken for by the CE step at bs=8. Pushing bs higher needs chunked CE or a Liger fused kernel (stretch goal). FP8 on H100 is another lever — ~40% on top of BF16 — but needs Transformer Engine wiring in `model.py` that isn't included here; also a stretch goal in §11.
+The diff against the A100 demo is **two fields, in this exact order**:
+
+1. `training.use_fused_ce: true` — without this, vocab=151,936 makes the `B·S·V` logits tensor and FP32 cross-entropy intermediates the binding memory constraint, so the H100's extra HBM is already spoken for by the CE step at bs=8 and you can't go bigger. With it, the LM head matmul and CE are fused in a chunked Triton kernel that never materializes `[B, S, V]` — peak CE memory drops ~5×, freeing room for a 4× larger micro-batch.
+2. `data.batch_size_per_device: 32` (and `training.grad_accum: 16` to keep tokens/step constant) — bigger micro-batch amortizes kernel-launch overhead and keeps the H100 SMs fed instead of starved. This is the actual throughput win.
+
+The header of [`configs/demo_h100.yaml`](configs/demo_h100.yaml) walks through the memory math (bs=8 → ~85 GB peak; bs=32 + fused CE → ~55 GB peak). **§11 below explains why `use_fused_ce` is opt-in rather than the default** — short version: it adds a `liger-kernel` dependency and hides a pedagogically important memory wall that the A100 demo deliberately exposes.
+
+FP8 on H100 is another lever — ~40% on top of BF16 — but needs Transformer Engine wiring in `model.py` that isn't included here; also a stretch goal in §11.
+
+While the run is live, **watch the `sm <pct>%` field in the log line**, not just HBM usage. SM% is the actual "is the H100 working" number — see §6's "metrics that matter".
 
 ### 8×A100 node — same config, ~8× faster
 
@@ -329,7 +339,15 @@ In order of "how often does watching this save a run":
 | **lr** | Follows your scheduler exactly | Mismatch = scheduler not wired correctly |
 | **tokens/sec** | Stable around the model's roofline | Drops = data loader stall or shared GPU |
 | **MFU (model FLOPs utilization)** | 20–50% on FSDP2 for this size | < 10% = comm-bound or framework overhead |
+| **SM utilization (`sm %`)** | 80–100% during the step body | < 60% sustained = SMs starved (dataloader, launch overhead, comms) |
 | **HBM used (peak)** | Stable each step; some room | Slowly growing → activation/optimizer leak; spikes to OOM |
+
+**`sm %` vs `mem GB`: what the two numbers really tell you.** The H100 prints both alongside loss/MFU. They answer different questions:
+
+- **`sm %`** is "how busy are the compute units in the last sampling window". This is the metric you should optimize. If `sm %` is at 90%+ and `mem` is at 35/80 GB, the GPU is fully working — the extra 45 GB of HBM is *headroom*, not *waste*. Pushing the batch up wouldn't help throughput; it'd just consume the buffer.
+- **`mem GB`** is "how much HBM is allocated right now (including PyTorch's caching allocator)". Steady allocated memory is often much higher than the actual live working set because the caching allocator holds onto memory grabbed during peaks (the CE step) to reuse later. So a 35 GB-allocated / 5 GB-actually-resident gap is normal and not something you can or should "reclaim".
+
+In other words: low `sm %` = you have a real efficiency problem to chase. Low `mem GB` use with high `sm %` = you're fine, that's what saturation looks like.
 
 **The math for tokens/sec → MFU**:
 
@@ -596,6 +614,17 @@ The same `torchrun train.py` works. What changes is hardware: 1B on a single A10
 ## 11. Stretch goals
 
 The framework supports the following with config-only changes (or one extra import):
+
+- **Fused linear + cross-entropy (Liger Kernel)**: `--training.use_fused_ce=true`. Requires `pip install liger-kernel`. Replaces the LM-head matmul + CE loss with a chunked Triton kernel that never materializes the `[B, S, V]` logits tensor. Memory at the loss step drops ~5×, unlocking a 4× larger micro-batch on the same GPU at vocab=151,936. The H100 config (`configs/demo_h100.yaml`) turns this on by default; the A100 config leaves it off.
+
+  **Why is this opt-in rather than the default?** Four reasons, in decreasing order of weight:
+
+  1. **It hides a pedagogically important wall.** The A100 demo is deliberately stuck at bs=8 because of the `B · S · V` logits tensor at Qwen3's 151k vocab. That wall *is* the lesson — it teaches that large-vocab models are CE-memory-bound at small scale, which is why frontier teams (Llama 3, DeepSeek) all use fused-or-chunked CE in production. Flipping the flag on by default would skip past the lesson.
+  2. **It adds a dependency.** `liger-kernel` is a Triton-kernel library with its own version compatibility surface (PyTorch / CUDA / driver). For a lab anyone clones onto a fresh RunPod, "the canonical config works with `pip install -r requirements.txt`" matters. The fused path is opt-in so a bad Liger/PyTorch combo can't break the baseline.
+  3. **The win shrinks as models scale.** At 150M params, fused CE is "I can move bs from 8 to 32" — useful, but only matters if SMs were starved at bs=8 (often they were). At ≥1B params the model dominates memory and CE becomes a smaller share; the same flag is then worth single-digit percent on throughput. The headline H100 win at the demo's scale is still *turning off activation checkpointing*, not fused CE.
+  4. **It changes numerics subtly.** Liger's fused kernel computes log-softmax + NLL in one chunked pass. The final loss matches the unfused path to within bf16 noise, but token-level gradients don't bit-equal anything you'd get from a baseline HF run. Fine for production, but worth being explicit about rather than silent.
+
+  Rule of thumb: turn it on when you're past the "understand the memory wall" stage and into "drive the GPU as hard as possible".
 
 - **FP8 training on H100/H200**: `--training.dtype=fp8`. Requires `transformer-engine` installed; `model.py` swaps in `te.Linear` for the hidden weights. ~40% wallclock savings vs BF16. Module 10 § 4.
 - **WSD schedule** instead of cosine: `--schedule.type=wsd`. Use this if total_steps is uncertain or you want to extend mid-run. Module 09 § 4.

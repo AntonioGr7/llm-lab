@@ -48,7 +48,7 @@ from schedule import build_scheduler
 from data import make_dataloader, cycle
 from checkpoint import save as save_ckpt, load as load_ckpt, latest as latest_ckpt, cleanup_old as cleanup_old_ckpts
 from fsdp_setup import init_distributed, apply_fsdp, cleanup_distributed
-from efficiency import apply_activation_checkpointing
+from efficiency import apply_activation_checkpointing, gpu_utilization_snapshot
 from loop import train_step
 
 
@@ -117,7 +117,8 @@ def _log_startup(rinfo, cfg: TrainConfig, model, device: str) -> None:
           f"tokens/step={tokens_per_step:,}  "
           f"total_tokens≈{tokens_per_step*cfg.training.total_steps/1e9:.2f}B")
     print(f"            grad_clip={cfg.training.grad_clip}  "
-          f"activation_checkpointing={cfg.training.activation_checkpointing}")
+          f"activation_checkpointing={cfg.training.activation_checkpointing}  "
+          f"fused_ce={cfg.training.use_fused_ce}")
     print(f"checkpoints: {cfg.training.checkpoint_dir}  every {cfg.training.save_every}")
     print("=" * 64, flush=True)
 
@@ -137,7 +138,7 @@ def main(argv=None):
     # ---- 3. Build model, apply efficiency + sharding ---------------------
     # Order matters: activation_checkpointing wraps each decoder layer; FSDP
     # then shards the wrapped layer. Reverse order silently breaks FSDP.
-    model = build_model(cfg.model).to(device)
+    model = build_model(cfg.model, fused_ce=cfg.training.use_fused_ce).to(device)
     if cfg.training.activation_checkpointing:
         apply_activation_checkpointing(model)
     model = apply_fsdp(model, dtype=cfg.training.dtype)
@@ -224,6 +225,7 @@ def main(argv=None):
             grad_clip=cfg.training.grad_clip,
             dtype=cfg.training.dtype,
             device=device,
+            fused_ce=cfg.training.use_fused_ce,
         )
         scheduler.step()
 
@@ -237,16 +239,33 @@ def main(argv=None):
             mfu = (flops_per_step * steps_window / max(dt_window, 1e-9)
                    / (peak_tflops * 1e12 * rinfo.world_size))
             lr_now = optimizer.param_groups[0]["lr"]
+            # Live GPU utilization (rank 0's device). SM% is the headline:
+            # if it's ~90%+ you're compute-bound and tuning batch/checkpointing
+            # won't buy throughput. If it's <60% the GPU is starving — look
+            # at the dataloader or kernel launch overhead, not at HBM headroom.
+            gpu = gpu_utilization_snapshot(0)
+            gpu_str = ""
+            if gpu is not None:
+                gpu_str = (f"  sm {gpu['sm_util']:.0f}%  "
+                           f"mem {gpu['mem_used_gb']:.1f}/{gpu['mem_total_gb']:.0f}GB")
             print(f"step {step:6d}  loss {loss:.4f}  grad_norm {grad_norm:.3f}  "
-                  f"lr {lr_now:.2e}  tok/s {tok_per_sec/1e3:.1f}k  mfu {mfu*100:.1f}%",
-                  flush=True)
+                  f"lr {lr_now:.2e}  tok/s {tok_per_sec/1e3:.1f}k  mfu {mfu*100:.1f}%"
+                  f"{gpu_str}", flush=True)
             last_log_time = now
 
             if wandb_run is not None:
-                wandb_run.log({
+                log_payload = {
                     "loss": loss, "grad_norm": grad_norm, "lr": lr_now,
                     "tokens_per_second": tok_per_sec, "mfu": mfu, "step": step,
-                })
+                }
+                if gpu is not None:
+                    log_payload.update({
+                        "gpu/sm_util": gpu["sm_util"],
+                        "gpu/mem_bw_util": gpu["mem_bw_util"],
+                        "gpu/mem_used_gb": gpu["mem_used_gb"],
+                        "gpu/mem_used_pct": gpu["mem_used_pct"],
+                    })
+                wandb_run.log(log_payload)
 
         # Save AFTER scheduler.step() has run. The "step" we persist is the
         # number of updates completed (step + 1), not the loop counter. That

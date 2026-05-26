@@ -7,36 +7,52 @@
 # What changed for H100-80GB (vs the A100 demo):
 #
 #   1. `training.activation_checkpointing: false`
-#         H100 has enough memory to drop the AC tax at the A100 micro-batch.
-#         AC was a ~33% FLOP tax we paid on A100 to fit; turning it off here
-#         recovers that wallclock. **This is the H100 win.**
+#         H100 has enough memory to drop the AC tax at the larger micro-batch
+#         we now use. AC was a ~33% FLOP tax we paid on A100 to fit; turning
+#         it off here recovers that wallclock.
 #
-#   2. Micro-batch unchanged (bs=8, grad_accum=64) — same tokens/step.
-#         Counter-intuitive at first: H100 has 80 GB just like A100-80GB,
-#         so why not push bs higher? Because at this model size the
-#         binding memory constraint is **not** activations or weights — it's
-#         the `B · S · V` logits tensor and the FP32 cross-entropy intermediates.
+#   2. `training.use_fused_ce: true` + larger micro-batch (`bs: 32`).
+#         Without this flag, the binding memory constraint is NOT activations
+#         or weights — it's the `B · S · V` logits tensor and the FP32
+#         cross-entropy intermediates at vocab=151,936. That's why the prior
+#         version of this config stayed at bs=8 even on an 80 GB H100; the
+#         CE peak hit ~85 GB long before activations or params did.
 #
-#         At vocab=151,936, seq=2048, the CE step alone wants:
-#           bs=8:   ~25 GB peak (fits, ~40 GB total → safe)
-#           bs=16:  ~50 GB peak (tight, OOMs with fragmentation)
-#           bs=32:  ~100 GB peak (instant OOM)
+#         Liger Kernel's fused linear+CE replaces the `lm_head` matmul + CE
+#         loss with a chunked Triton kernel that never materializes the full
+#         logits tensor. Memory at the loss step drops ~5x:
+#           bs=8, no fused-CE:   ~85 GB peak
+#           bs=32, fused-CE:     ~55 GB peak (comfortably under 80 GB)
+#         Throughput goes up because larger micro-batches amortize the launch
+#         overhead and the H100's SMs were starved at bs=8.
 #
-#         The 150M parameters are dwarfed by the CE step. To actually use
-#         a larger micro-batch here you'd need chunked CE or a Liger fused
-#         CE kernel — out of scope for this module, see README stretch goals.
-#         For ≥1B models the math flips and large micro-batches do pay off.
+#         **See README §11 for why this flag is off by default and not just
+#         baked in.** TL;DR: it adds a `liger-kernel` dependency, it hides
+#         the vocab-driven CE-memory wall (which is a teaching moment), and
+#         the win flips at ≥1B params where the model dwarfs the CE step.
 #
-#   3. `dtype: bf16` — unchanged. FP8 on H100 needs Transformer Engine
+#   3. Tokens/step kept constant by halving `grad_accum` (64 → 16):
+#         8 · 64 · 2048  ≈  32 · 16 · 2048  ≈  1.05M tokens/step.
+#         Same Chinchilla-optimal token budget; same final loss to noise.
+#
+#   4. `dtype: bf16` — unchanged. FP8 on H100 needs Transformer Engine
 #         (te.Linear inside the Qwen3 decoder + te.fp8_autocast in the loop)
 #         which isn't wired in this module. See README §11 stretch goals.
+#
+# Setup:
+#   pip install liger-kernel        # required for use_fused_ce
 #
 # Launch:
 #   torchrun --standalone --nproc_per_node=1 train.py \
 #       --config=configs/demo_h100.yaml --gpu=H100
 #
-# Expected wallclock on a single H100-80GB: ~1.5–3 hours.
-# Expected cost on RunPod (H100 ~$2–3/hr): ~$5–10.
+# Watch the rank-0 log: `sm <pct>%` is the metric to track. If SM% stays
+# above ~85 you're compute-bound and there's nothing left to tune; if it's
+# below ~60 the dataloader or kernel launches are the bottleneck, not memory.
+#
+# Expected wallclock on a single H100-80GB: ~1.2–2 hours (faster than the
+# pre-fused-CE config because the larger micro-batch keeps the SMs fed).
+# Expected cost on RunPod (H100 ~$2–3/hr): ~$3–6.
 # Expected final perplexity on a FineWeb-Edu validation slice: 15–22 (same).
 
 model:
@@ -66,7 +82,7 @@ schedule:
 data:
   source: fineweb_edu      # set to 'synthetic' for offline smoke tests
   seq_len: 2048
-  batch_size_per_device: 8   # CE-bound at vocab=151,936 — see comment block above
+  batch_size_per_device: 32  # made possible by training.use_fused_ce below
   num_workers: 2
   pin_memory: true
   tokenizer_name: Qwen/Qwen3-0.6B
@@ -75,14 +91,15 @@ data:
 
 training:
   # tokens/step = batch * grad_accum * world_size * seq_len
-  #             = 8 * 64 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
-  #             = 8 *  8 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=8)
+  #             = 32 * 16 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
+  #             = 32 *  2 * 8 * 2048 ≈ 1.05M tokens/step  on  8 GPUs (override grad_accum=2)
   # × 3000 steps ≈ 3.15B tokens  →  same ~15:1 ratio as the A100 demo.
   total_steps: 3000
-  grad_accum: 64           # set to 8 on an 8-GPU node (keeps tokens/step constant)
+  grad_accum: 16           # halved from the old 64 since per-device batch is 4× larger
   grad_clip: 1.0           # the LLM-canonical clip threshold
   dtype: bf16              # FP8 would need Transformer Engine wiring (README §11)
   activation_checkpointing: false  # H100 has the memory — recover the ~33% FLOP tax
+  use_fused_ce: true       # Liger fused linear+CE — see comment block above
   log_every: 10
   save_every: 500
   eval_every: 0            # set to e.g. 500 to run validation perplexity mid-training

@@ -39,21 +39,30 @@ def forward_loss(
     batch: dict,
     dtype: str = "bf16",
     device: str = "cuda",
+    fused_ce: bool = False,
 ) -> torch.Tensor:
     """One forward pass under autocast; returns the scalar loss tensor.
 
-    Computes cross-entropy against the (already-shifted) labels from
-    `data.py`. The model is called without `labels=` — we only require
-    its forward to return an object with `.logits` of shape `[B, S, V]`.
+    Default path (`fused_ce=False`): computes cross-entropy against the
+    (already-shifted) labels from `data.py`. The model is called without
+    `labels=` — we only require its forward to return an object with
+    `.logits` of shape `[B, S, V]`. This is the architecture-agnostic path.
+
+    Fused path (`fused_ce=True`): the model has been patched by Liger
+    Kernel (see `model.build_model`) so that passing `labels=` triggers a
+    fused linear+CE Triton kernel inside the LM head. The `[B, S, V]`
+    logits tensor never exists. We just consume `out.loss`.
 
     Args:
-        model: the (FSDP-wrapped) model. Must expose `.logits` on its output.
+        model: the (FSDP-wrapped) model.
         batch: dict with `input_ids` and `labels` (both LongTensor).
             By the dataset contract `labels[t] == input_ids[t+1]`, so no
             further shifting is done here.
         dtype: "bf16" or "fp32". FP8 is handled in `train_step` directly,
             not here.
         device: where to move the batch.
+        fused_ce: use the Liger fused-linear-CE path. Requires the model
+            to have been built with `build_model(cfg, fused_ce=True)`.
 
     Returns:
         Scalar loss tensor on `device`.
@@ -64,6 +73,15 @@ def forward_loss(
     ctx = (torch.autocast(device_type=device, dtype=_DTYPE[dtype])
            if dtype != "fp32" else nullcontext())
     with ctx:
+        if fused_ce:
+            # Liger-patched Qwen3: loss is computed inside the model using
+            # a fused linear+CE Triton kernel that never materializes the
+            # `[B, S, V]` logits tensor. Memory peak at the loss step drops
+            # ~5x at vocab=151,936 — the binding constraint for this model
+            # size on an H100. See README §11 for the rationale.
+            out = model(input_ids=input_ids, labels=labels)
+            return out.loss
+
         out = model(input_ids=input_ids)
         logits = out.logits if hasattr(out, "logits") else out
 
@@ -85,6 +103,7 @@ def train_step(
     grad_clip: float,
     dtype: str = "bf16",
     device: str = "cuda",
+    fused_ce: bool = False,
 ) -> tuple[float, float]:
     """One full optimizer step = `grad_accum` micro-batches.
 
@@ -98,7 +117,8 @@ def train_step(
 
     for accum_idx in range(grad_accum):
         batch = next(batch_iter)
-        loss = forward_loss(model, batch, dtype=dtype, device=device) / grad_accum
+        loss = forward_loss(model, batch, dtype=dtype, device=device,
+                            fused_ce=fused_ce) / grad_accum
 
         # FSDP: skip cross-rank gradient sync on all but the last micro-batch.
         is_last = (accum_idx == grad_accum - 1)

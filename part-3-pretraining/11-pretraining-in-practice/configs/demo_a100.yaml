@@ -11,7 +11,15 @@
 #
 # Running on H100-80GB? Use `configs/demo_h100.yaml` instead — same model and
 # token budget, but tuned for H100's larger headroom and ~3× BF16 throughput
-# (bigger micro-batch, activation checkpointing off, ~1.5–3h wallclock).
+# (bigger micro-batch, activation checkpointing off, ~1.2–2h wallclock).
+#
+# A note on `training.use_fused_ce`: this config leaves it at `false` so the
+# canonical A100 demo has zero extra dependencies. If you `pip install
+# liger-kernel`, you can flip it to `true` and either drop `activation_
+# checkpointing` to recover the 33% FLOP tax, or bump `batch_size_per_device`
+# from 8 → 16 (or 24) — same ~5x CE memory headroom as on H100. The
+# rationale for why this is opt-in rather than the default lives in
+# README §11.
 
 model:
   vocab_size: 151936       # Qwen3 tokenizer

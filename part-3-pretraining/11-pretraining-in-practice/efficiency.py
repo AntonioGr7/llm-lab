@@ -1,6 +1,6 @@
 """Scaling and efficiency utilities for Part 3's pretraining framework.
 
-Three additive helpers — none of them rewrite anything from Module 08:
+Four additive helpers — none of them rewrite anything from Module 08:
 
 - `apply_activation_checkpointing(model)`: wraps each Qwen3 decoder layer
   with a NO_REENTRANT checkpoint wrapper. Call BEFORE FSDP wrapping.
@@ -10,9 +10,11 @@ Three additive helpers — none of them rewrite anything from Module 08:
 - `chinchilla_optimal(flops)` and `training_flops(n, d)`: the 6ND
   approximation and its inversion. Compute-optimal (N, D) given a FLOP
   budget; FLOP cost given (N, D).
-
-All three are pure-Python / pure-math except `apply_activation_checkpointing`,
-which calls into `torch.distributed.algorithms._checkpoint`.
+- `gpu_utilization_snapshot(...)`: a one-shot NVML read of SM/mem-bandwidth
+  utilization and memory usage. Used by `train.py` to print live numbers
+  alongside the loss/tok/s line. SM% is the metric you should actually
+  watch — it answers "is the GPU compute-bound or are we leaving cycles
+  on the table" in a way that HBM utilization doesn't.
 """
 from __future__ import annotations
 
@@ -209,7 +211,64 @@ def memory_breakdown(
 
 
 # ----------------------------------------------------------------------
-# 3. Chinchilla budgeting
+# 3. Live GPU utilization (NVML)
+# ----------------------------------------------------------------------
+
+_NVML_INITED = False
+
+
+def gpu_utilization_snapshot(device_index: int = 0) -> dict | None:
+    """One-shot NVML read of GPU utilization and memory.
+
+    Returns a dict with:
+      - sm_util:        % of the last sampling period the SMs had at least
+                        one warp resident. **This is the number to watch.**
+                        If it sits at 90-100% you're compute-bound (good);
+                        if it sits at 30-50% you're memory- or launch-bound.
+      - mem_bw_util:    % of the period memory was being read/written. Not
+                        the same as "fraction of HBM in use" — this is
+                        memory *bandwidth* utilization.
+      - mem_used_gb:    actual bytes allocated on the GPU.
+      - mem_total_gb:   total HBM capacity.
+      - mem_used_pct:   convenience: 100 * used/total.
+
+    Returns None if pynvml isn't installed or NVML isn't queryable — the
+    caller should treat this as "no data" rather than crashing.
+
+    SM utilization vs allocated memory: a common misconception is that low
+    HBM usage means the GPU is "idle". It doesn't. HBM headroom only means
+    you *could* use a bigger batch / model; whether you *should* depends on
+    whether the SMs are saturated. A run at 35 GB allocated but 95% SM
+    utilization is fully saturated — pushing the batch up would only help
+    if you were also compute-bottlenecked, which you aren't.
+    """
+    global _NVML_INITED
+    try:
+        import pynvml
+    except ImportError:
+        return None
+    try:
+        if not _NVML_INITED:
+            pynvml.nvmlInit()
+            _NVML_INITED = True
+        h = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+        util = pynvml.nvmlDeviceGetUtilizationRates(h)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+        return {
+            "sm_util": float(util.gpu),
+            "mem_bw_util": float(util.memory),
+            "mem_used_gb": mem.used / (1024 ** 3),
+            "mem_total_gb": mem.total / (1024 ** 3),
+            "mem_used_pct": 100.0 * mem.used / mem.total,
+        }
+    except Exception:
+        # NVML can fail inside containers, on CPU-only nodes, or when the
+        # driver mismatches pynvml. Treat any failure as "no data".
+        return None
+
+
+# ----------------------------------------------------------------------
+# 4. Chinchilla budgeting
 # ----------------------------------------------------------------------
 
 def training_flops(n_params: float, n_tokens: float) -> float:

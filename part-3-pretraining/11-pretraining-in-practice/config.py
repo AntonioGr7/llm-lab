@@ -118,6 +118,14 @@ class TrainingConfig:
     grad_clip: float = 1.0
     dtype: Dtype = "bf16"
     activation_checkpointing: bool = True   # Module 10 — on by default for the demo
+    # Fused linear + cross-entropy via Liger Kernel. When True, the LM head's
+    # matmul is fused with cross-entropy in a chunked Triton kernel that never
+    # materializes the full `[B, S, V]` logits tensor — the dominant memory
+    # cost at large vocab (Qwen3 = 151,936). Frees ~5x at the loss step,
+    # letting you push the micro-batch from 8 → 32+ on H100 at this model
+    # size. Runs on Ampere (A100) and Hopper (H100); not Hopper-specific.
+    # Off by default — see README §11 stretch goals for the rationale.
+    use_fused_ce: bool = False
     log_every: int = 10
     save_every: int = 500
     eval_every: int = 0                     # 0 = disabled; set to e.g. 500 to run eval mid-training

@@ -48,7 +48,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from config import ModelConfig
 
 
-def build_model(cfg: ModelConfig) -> nn.Module:
+def build_model(cfg: ModelConfig, fused_ce: bool = False) -> nn.Module:
     """Build a randomly-initialized Qwen3-architecture model for pretraining.
 
     The returned model:
@@ -56,7 +56,38 @@ def build_model(cfg: ModelConfig) -> nn.Module:
       with `.loss` and `.logits`.
     - Is FSDP2-compatible (its layers live in `model.model.layers`).
     - Is sized by the fields of `cfg`. Defaults give a ~150M-param model.
+
+    Args:
+        cfg: model geometry.
+        fused_ce: if True, patches Qwen3 with Liger Kernel's fused linear +
+            cross-entropy before instantiation. The patched model still has
+            the same `forward(input_ids, labels=...)` API, but when `labels`
+            are passed, the LM head matmul is fused with CE in a chunked
+            Triton kernel — the full `[B, S, V]` logits tensor is never
+            materialized. See `loop.py` for how the loop drives the fused
+            path, and README §11 for the rationale of why this is opt-in.
     """
+    if fused_ce:
+        # Patch must happen BEFORE `Qwen3ForCausalLM(...)` constructs the
+        # model — Liger patches the class, not the instance. We only flip
+        # `fused_linear_cross_entropy` and leave the other Liger patches
+        # (RoPE, RMSNorm, SwiGLU) off to minimize the blast radius — those
+        # change numerics subtly and aren't what's saving you the memory.
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+        except ImportError as e:
+            raise ImportError(
+                "training.use_fused_ce=true requires `pip install liger-kernel`. "
+                "See README §11 stretch goals for what this trades off."
+            ) from e
+        apply_liger_kernel_to_qwen3(
+            rope=False,
+            rms_norm=False,
+            swiglu=False,
+            cross_entropy=False,                # we want the *fused* variant, not the standalone CE patch
+            fused_linear_cross_entropy=True,
+        )
+
     config = Qwen3Config(
         vocab_size=cfg.vocab_size,
         hidden_size=cfg.d_model,
