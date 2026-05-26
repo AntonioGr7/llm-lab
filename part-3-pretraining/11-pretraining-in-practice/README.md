@@ -313,7 +313,10 @@ torchrun ... train.py --config=configs/demo_a100.yaml \
 
 **Disabling**: set `wandb_project=""` (the default). No W&B import is attempted; stdout logging is unchanged.
 
-**Why we pass `console="off"`.** `train.py` calls `wandb.init(..., settings=wandb.Settings(console="off"))`. By default wandb redirects stdout/stderr at the file-descriptor level so it can mirror your terminal into the run page. Under `torchrun` (and in Lightning AI / Docker / other non-TTY launches) that redirect can deadlock the writer pipe right after `wandb.init` returns — the run URL prints, then the training loop never starts. `console="off"` keeps prints on the local terminal and skips the mirror, which is the right trade for a GPU-rented run where silence is the worst outcome.
+**Two W&B-specific gotchas this module fixes for you.** Both have the same symptom — the wandb run URL prints, then the loop never starts — and both are easy to chase for hours if you don't know about them:
+
+1. **`wandb.init(..., settings=wandb.Settings(console="off"))`.** By default wandb redirects stdout/stderr at the file-descriptor level so it can mirror your terminal into the run page. Under `torchrun` (and in Lightning AI / Docker / other non-TTY launches) that redirect can deadlock the writer pipe right after `wandb.init` returns. `console="off"` keeps prints on the local terminal and skips the mirror — the right trade for a GPU-rented run where silence is the worst outcome.
+2. **`DataLoader(..., multiprocessing_context="forkserver")` whenever `num_workers > 0`.** The standard PyTorch DataLoader forks worker subprocesses on the first batch. `wandb.init` starts background threads (heartbeat, uploader, file watcher) *before* that fork happens, and a POSIX `fork()` in a process that already has threads is undefined behavior — it deadlocks reliably when any of those threads hold a lock at the fork instant. `"forkserver"` routes the fork through a tiny helper process with no pre-existing threads, so workers spawn safely. (Without wandb the main process has no extra threads, fork is fine, and you'd never see this. Add any thread-spawning library and the latent bug surfaces.)
 
 ### The metrics that matter
 

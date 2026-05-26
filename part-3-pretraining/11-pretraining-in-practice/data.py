@@ -283,6 +283,13 @@ def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
             "Supported: 'synthetic', 'fineweb_edu'."
         )
 
+    # multiprocessing_context: when num_workers > 0, DataLoader spawns workers
+    # by forking the main process. If wandb.init() (or anything else) has already
+    # started background threads, a plain fork() deadlocks — Python's multiprocessing
+    # docs explicitly warn against fork-after-threads. "forkserver" forks workers
+    # from a tiny helper process with no pre-existing threads, so it stays safe.
+    mp_context = "forkserver" if cfg.num_workers > 0 else None
+
     return DataLoader(
         dataset,
         batch_size=cfg.batch_size_per_device,
@@ -293,6 +300,7 @@ def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
         # re-spawning between phases of the outer loop, but they keep the
         # streaming connection open across DataLoader iterations.
         persistent_workers=cfg.num_workers > 0,
+        multiprocessing_context=mp_context,
     )
 
 

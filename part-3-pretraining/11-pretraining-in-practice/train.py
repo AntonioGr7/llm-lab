@@ -198,6 +198,9 @@ def main(argv=None):
 
     # ---- 7. Train --------------------------------------------------------
     model.train()
+    if rinfo.is_main:
+        print("[rank 0] entering training loop; first batch may take 30-60s "
+              "while DataLoader workers tokenize the initial pack", flush=True)
     t_start = time.time()
     last_log_time = t_start
     tokens_per_step = (
