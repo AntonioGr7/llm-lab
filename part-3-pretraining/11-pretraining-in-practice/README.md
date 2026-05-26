@@ -83,6 +83,8 @@ The pipeline is short. Per rank, we:
 
 The "+1" matters. For next-token prediction with cross-entropy, you need `input_ids[t]` and `labels[t] = input_ids[t+1]` aligned. Packing one extra token per sample makes the shift clean. This is the canonical preprocessing every frontier-model team uses.
 
+**Where the loss is computed.** The shift happens **in the dataset, once**. The training loop calls `model(input_ids=...)` (no `labels=` kwarg), takes `.logits`, and applies cross-entropy against `batch["labels"]` itself — see [`loop.py:forward_loss`](loop.py). The model contract is therefore minimal: *return logits of shape `[B, S, V]`*. This avoids the per-architecture quirk where some HF causal LMs shift internally when you pass `labels=` (Qwen, Llama, Mistral, Gemma) and others don't (older GPT-2, plus any custom `nn.Module`). The framework stays swap-friendly across HF families and your own implementations.
+
 **Why packing.** Without packing, each document becomes one (short) sample, padded to `seq_len`. Most batches are mostly padding. Packing concatenates documents (separated by EOS) and chops the stream into fixed-length blocks — **no padding waste, ~100% of GPU FLOPs do real work**. The model learns that EOS-then-new-document is a discontinuity, which is fine; document boundaries are not a meaningful structure to preserve at pretraining.
 
 **Why streaming over downloading.** FineWeb-Edu sample-10BT is ~40 GB on disk after tokenization. Streaming costs ~50 MB/s of network on a typical Lambda Labs node, well below the GPU's appetite. You skip the 30-minute download and the disk space.

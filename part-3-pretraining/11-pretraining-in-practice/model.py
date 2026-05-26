@@ -1,8 +1,18 @@
 """Model builder for Part 3 pretraining — defaults to Qwen3 architecture.
 
-The framework's contract: `build_model(model_cfg) -> nn.Module` whose forward
-accepts `input_ids=..., labels=...` and returns an object with `.loss` and
-`.logits`. This matches every Hugging Face causal-LM class.
+**The framework's contract is intentionally minimal:**
+
+    build_model(model_cfg) -> nn.Module
+    whose forward accepts `input_ids=...` and returns an object with `.logits`
+    of shape `[B, S, V]`. Loss is computed in `loop.py`, not here.
+
+That's it. No `labels=` kwarg, no `.loss` field, no architecture-specific
+behavior assumed. This keeps the framework swap-friendly across:
+- HF causal LMs (Qwen3, Llama, Mistral, Gemma — all return `.logits` from
+  forward when called without labels).
+- Custom nn.Modules whose forward returns a logits tensor (no `.logits`
+  attribute — `loop.py` handles both shapes).
+- A raw forward that returns a tensor directly is also fine.
 
 **To swap in a different architecture**: replace the function body. Examples:
 
@@ -23,8 +33,11 @@ def build_model(cfg):
         rms_norm_eps=cfg.norm_eps,
     ))
 
-# Our Part-2 TransformerLM with an adapter for the (.loss, .logits) contract.
-# See module README, Section 3.
+# Your Part-2 TransformerLM — return its raw logits tensor directly. No
+# adapter needed; loop.py accepts either `out.logits` or a bare tensor.
+from part2 import TransformerLM
+def build_model(cfg):
+    return TransformerLM(vocab=cfg.vocab_size, d=cfg.d_model, L=cfg.n_layers, ...)
 ```
 """
 from __future__ import annotations

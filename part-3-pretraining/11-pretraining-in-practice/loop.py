@@ -6,6 +6,19 @@ Two responsibilities, factored out of `train.py` so they're testable:
   a scalar loss tensor.
 - `train_step(model, optimizer, batch_iter, ...)`: one optimizer step,
   including gradient accumulation + FSDP-aware `no_sync` + clipping.
+
+**Model contract.** `forward_loss` calls `model(input_ids=...)` and expects
+back an object with `.logits` (shape `[B, S, V]`). It does NOT pass `labels=`
+to the model and does NOT rely on any built-in loss computation. The loss is
+cross-entropy against `batch["labels"]`, computed here. This keeps the loop
+architecture-agnostic — any module with `forward(input_ids) -> (.logits)`
+works, whether it's HF Qwen3, HF Llama, a custom nn.Module, or your own
+Part-2 TransformerLM with a thin adapter.
+
+Why not let HF compute the loss for us? Because the `labels=` contract is
+not stable across architectures or transformers versions — some HF models
+shift internally, some don't, some accept `shift_labels=`. We shift once in
+the dataset (see data.py) and own the loss here.
 """
 from __future__ import annotations
 
@@ -14,6 +27,7 @@ from typing import Iterator
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # Dtype string -> torch dtype mapping used by the autocast context.
@@ -28,9 +42,15 @@ def forward_loss(
 ) -> torch.Tensor:
     """One forward pass under autocast; returns the scalar loss tensor.
 
+    Computes cross-entropy against the (already-shifted) labels from
+    `data.py`. The model is called without `labels=` — we only require
+    its forward to return an object with `.logits` of shape `[B, S, V]`.
+
     Args:
-        model: the (FSDP-wrapped) model.
+        model: the (FSDP-wrapped) model. Must expose `.logits` on its output.
         batch: dict with `input_ids` and `labels` (both LongTensor).
+            By the dataset contract `labels[t] == input_ids[t+1]`, so no
+            further shifting is done here.
         dtype: "bf16" or "fp32". FP8 is handled in `train_step` directly,
             not here.
         device: where to move the batch.
@@ -41,12 +61,20 @@ def forward_loss(
     input_ids = batch["input_ids"].to(device, non_blocking=True)
     labels = batch["labels"].to(device, non_blocking=True)
 
-    if dtype == "fp32":
-        out = model(input_ids=input_ids, labels=labels)
-    else:
-        with torch.autocast(device_type=device, dtype=_DTYPE[dtype]):
-            out = model(input_ids=input_ids, labels=labels)
-    return out.loss
+    ctx = (torch.autocast(device_type=device, dtype=_DTYPE[dtype])
+           if dtype != "fp32" else nullcontext())
+    with ctx:
+        out = model(input_ids=input_ids)
+        logits = out.logits if hasattr(out, "logits") else out
+
+    # ignore_index=-100 is the standard HF convention for masked positions
+    # (e.g. padding tokens, or prompt tokens in SFT). The pretraining packer
+    # doesn't emit -100s, but honoring it keeps the loop reusable downstream.
+    return F.cross_entropy(
+        logits.view(-1, logits.size(-1)),
+        labels.view(-1),
+        ignore_index=-100,
+    )
 
 
 def train_step(
