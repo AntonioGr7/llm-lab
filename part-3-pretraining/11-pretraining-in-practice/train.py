@@ -159,11 +159,15 @@ def main(argv=None):
     if rinfo.is_main and cfg.training.wandb_project:
         try:
             import wandb
+            # console="off": don't let wandb redirect stdout/stderr. Under torchrun
+            # (and in Lightning AI / Docker / other non-TTY environments) wandb's
+            # default fd-level redirect deadlocks the training loop after init.
             init_kwargs = dict(
                 project=cfg.training.wandb_project,
                 name=cfg.training.wandb_run_name or None,
                 config=cfg.to_dict(),
                 tags=list(cfg.training.wandb_tags) or None,
+                settings=wandb.Settings(console="off"),
             )
             if cfg.training.wandb_entity:
                 init_kwargs["entity"] = cfg.training.wandb_entity
@@ -171,7 +175,7 @@ def main(argv=None):
                 init_kwargs["id"] = cfg.training.wandb_run_id
                 init_kwargs["resume"] = "allow"
             wandb_run = wandb.init(**init_kwargs)
-            print(f"[rank 0] wandb run: {wandb_run.get_url()}", flush=True)
+            print(f"[rank 0] wandb run: {wandb_run.url}", flush=True)
         except ImportError:
             print("[rank 0] wandb requested but not installed (pip install wandb); "
                   "logging to stdout only")

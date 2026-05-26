@@ -311,6 +311,8 @@ torchrun ... train.py --config=configs/demo_a100.yaml \
 
 **Disabling**: set `wandb_project=""` (the default). No W&B import is attempted; stdout logging is unchanged.
 
+**Why we pass `console="off"`.** `train.py` calls `wandb.init(..., settings=wandb.Settings(console="off"))`. By default wandb redirects stdout/stderr at the file-descriptor level so it can mirror your terminal into the run page. Under `torchrun` (and in Lightning AI / Docker / other non-TTY launches) that redirect can deadlock the writer pipe right after `wandb.init` returns — the run URL prints, then the training loop never starts. `console="off"` keeps prints on the local terminal and skips the mirror, which is the right trade for a GPU-rented run where silence is the worst outcome.
+
 ### The metrics that matter
 
 In order of "how often does watching this save a run":
