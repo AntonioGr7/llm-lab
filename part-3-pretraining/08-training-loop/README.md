@@ -22,13 +22,12 @@ Twelve lines. Frontier labs spend months on the dressings — distributed shardi
 
 By the end of this module you have:
 
-- A working `torchrun train.py` that launches on 1 GPU or 64 GPUs from the same code.
 - A model builder that defaults to Qwen3 but takes ~5 lines to swap.
 - AdamW with the param groups frontier labs actually use.
-- BF16 mixed precision, gradient accumulation, gradient clipping, FSDP2 sharding, and FSDP-aware checkpointing — all wired in.
-- A complete framework you could `cp -r` into another repo and pretrain a model with.
+- BF16 mixed precision, gradient accumulation, gradient clipping, FSDP2 sharding, and FSDP-aware checkpointing — each isolated in its own file so you can read it.
+- A notebook that exercises the inner loop end-to-end on CPU.
 
-The next modules (09, 10, 11) add the learning-rate schedule, the scaling story, and the real dataset. The loop itself is finished here.
+This module ships the **concepts**: one `.py` per idea, plus a CPU-runnable notebook. The next modules (09, 10) add the learning-rate schedule and the scaling/efficiency toolkit. [Module 11](../11-pretraining-in-practice/) is where everything composes into the runnable `train.py` you launch with `torchrun` — that's the directory you lift out into a new repo. The loop itself is finished here.
 
 ## What you'll be able to do at the end
 
@@ -38,24 +37,24 @@ The next modules (09, 10, 11) add the learning-rate schedule, the scaling story,
 - Pick a reasonable AdamW configuration without guessing.
 - Diagnose the most common training-loop failure modes (NaN at step 0, OOM, slow data loader, dead grads).
 
-## 1. The framework layout
+## 1. The module layout
 
-This module ships the framework directory the rest of Part 3 builds on:
+One file per concept. The notebook drives them; there is **no `train.py` in this module** — the runnable entrypoint lives in [Module 11](../11-pretraining-in-practice/train.py), which composes everything below with the LR schedule (Module 09), activation checkpointing (Module 10), and the FineWeb-Edu data pipeline.
 
 ```
 08-training-loop/
-  config.py        # TrainConfig dataclass — every knob
+  config.py        # composed-dataclass pattern + YAML loader
   model.py         # build_model(cfg) — defaults to Qwen3
-  optim.py         # build_optimizer(...) — AdamW with param groups
+  optim.py         # build_optimizer(...) — AdamW with param groups (+ Muon)
+  muon.py          # the Muon optimizer (Newton-Schulz orthogonalization)
   loop.py          # train_step() and forward_loss() — the inner loop helpers
-  data.py          # SyntheticDataset + make_dataloader — replace in Module 11
-  checkpoint.py    # save/load with FSDP2-aware sharded state dicts
-  fsdp_setup.py    # init_distributed() and apply_fsdp() — torchrun + FSDP2 wrapping
-  train.py         # the entrypoint you launch with torchrun
+  data.py          # SyntheticDataset — for exercising the loop without a corpus
+  fsdp_setup.py    # init_distributed() and apply_fsdp() — torchrun + FSDP2
+  checkpoint.py    # save/load with FSDP2-aware sharded state dicts (DCP)
   notebook.ipynb   # CPU-friendly walkthrough of each component
 ```
 
-Modules 09–11 add files (LR schedule, FSDP advanced patterns, real data loaders) but don't rewrite anything here. The contract is stable.
+The contract these files define is stable. Modules 09 and 10 add files (`schedule.py`, `efficiency.py`) without rewriting anything here; Module 11 copies them all into its self-contained directory and adds the real `train.py`, the FineWeb-Edu loader, and the demo config.
 
 ## 2. Anatomy of a training step
 
@@ -361,7 +360,7 @@ def load(model, optimizer, ckpt_dir):
 
 ## 10. The complete loop
 
-Putting it together (this is `train.py` in essence — see [`train.py`](train.py) for the full version with argument parsing and logging):
+Putting it together — this is what an integrator looks like in essence. The full version (with argument parsing, YAML config, LR scheduler, MFU logging, W&B, and resume-fast-forward) lives in [Module 11's `train.py`](../11-pretraining-in-practice/train.py):
 
 ```python
 def train(cfg):
@@ -401,17 +400,16 @@ That's the full inner skeleton. ~25 lines. The framework files in this directory
 
 ## 11. Running it
 
-The directory is built so this works on day one:
+This module is the **concepts**, not the runnable framework. To see the components in action without leaving CPU, work through [`notebook.ipynb`](notebook.ipynb): it builds a tiny Qwen3, constructs the optimizer, runs one full forward/backward via `train_step`, demonstrates gradient accumulation, and round-trips a checkpoint through DCP.
+
+When you want to actually launch a real `torchrun` run — single GPU, single node, or multi-node — go to [Module 11](../11-pretraining-in-practice/). It composes everything in this module with the LR scheduler (Module 09), activation checkpointing (Module 10), and the FineWeb-Edu data pipeline, behind a `train.py` you launch like this:
 
 ```bash
-cd part-3-pretraining/08-training-loop/
-torchrun --standalone --nproc_per_node=1 train.py \
-    --total_steps=10 --log_every=1 --vocab_size=2048 --d_model=128
+cd part-3-pretraining/11-pretraining-in-practice/
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo.yaml
 ```
 
-This launches a tiny 3M-param run on a synthetic dataset, logs ~10 steps, and exits. It's not a *useful* model, but it proves the loop is wired correctly. Module 11 replaces `SyntheticDataset` with the FineWeb-Edu pipeline and runs at scale.
-
-You can also work through [`notebook.ipynb`](notebook.ipynb) on CPU to see each piece — model building, optimizer construction, one forward/backward pass — without launching torchrun.
+That's the directory you `cp -r` into another project to pretrain your own model.
 
 ## 12. Common failure modes (and what they look like)
 
@@ -430,7 +428,7 @@ This is the punch list. If it's not on it, suspect the data first.
 
 ## 13. What's next
 
-- **[Module 09 — Learning Rate](../09-learning-rate/)** adds `schedule.py` with warmup + cosine decay and the muP transfer recipe. This module's `train.py` updates to call the scheduler after each step.
+- **[Module 09 — Learning Rate](../09-learning-rate/)** adds `schedule.py` with warmup + cosine decay and the muP transfer recipe. The integrator gains two lines: scheduler construction after the optimizer, and `scheduler.step()` after each `optimizer.step()`.
 - **[Module 10 — Scaling and Efficiency](../10-scaling-and-efficiency/)** goes deep on FSDP2 — the sharding choices, mixed-precision policies, gradient checkpointing, tensor parallelism, MTP, Chinchilla. Throughput tuning.
 - **[Module 11 — Pretraining in Practice](../11-pretraining-in-practice/)** replaces `SyntheticDataset` with the FineWeb-Edu pipeline, ships the actual demo config, and walks through a real run end-to-end with monitoring.
 

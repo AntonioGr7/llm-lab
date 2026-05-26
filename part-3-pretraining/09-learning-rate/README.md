@@ -15,7 +15,7 @@ This module covers four things:
 3. **muP transfer in practice** — sweep LR at a small proxy width, transfer to the big one. With concrete numbers.
 4. **Diagnostics** — what too-high and too-low LR look like in a loss curve, so you don't waste a training run finding out.
 
-The framework piece from this module is one file: [`schedule.py`](schedule.py). Module 08's `train.py` becomes scheduler-aware with two added lines.
+The framework piece from this module is one file: [`schedule.py`](schedule.py). The integrator (Module 11's `train.py`) becomes scheduler-aware with two added lines.
 
 ## What you'll be able to do at the end
 
@@ -277,7 +277,7 @@ The scheduler interface follows PyTorch's `LRScheduler` so it composes with any 
 
 ## 9. Wiring it into the training loop
 
-Adding the scheduler to Module 08's `train.py` is two lines: one for setup, one for the per-step call.
+Adding the scheduler to a training loop is two lines: one for setup, one for the per-step call. Module 11's `train.py` ships them wired in.
 
 ```python
 from schedule import build_scheduler           # new import
@@ -290,7 +290,7 @@ optimizer.step()
 scheduler.step()                                       # new line
 ```
 
-The notebook in this directory shows this integrated into a small run. Module 11's final `train.py` ships the full version.
+The notebook in this directory shows this integrated into a small run. [Module 11's `train.py`](../11-pretraining-in-practice/train.py) ships the full version, including resume-fast-forward when loading a checkpoint mid-schedule.
 
 ## 10. Reading list
 

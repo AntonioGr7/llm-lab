@@ -371,7 +371,7 @@ Plus a small `__main__` smoke test.
 
 ## 10. Wiring it into the training loop
 
-Two changes to Module 08's `train.py` to use this module's pieces:
+Two changes to the integrator (Module 11's `train.py`) to use this module's pieces:
 
 ```python
 from efficiency import apply_activation_checkpointing   # new import
