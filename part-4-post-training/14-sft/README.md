@@ -35,6 +35,7 @@ If you internalize those three differences, you understand SFT. Everything else 
 ```
 14-sft/
 ├── README.md              you are here
+├── notebook.ipynb         CPU-only tour: the loss mask, one step, memory, loss curve
 ├── config.py              TrainConfig — model, data, optimizer, schedule, training
 ├── model.py               build_model() — loads HF causal LM by name
 ├── data.py                ChatDataset — applies chat template + computes assistant-only loss mask
@@ -96,24 +97,25 @@ Computing the mask correctly is the entire game. Two practical approaches:
 
 **Approach A — naive: regex on the rendered string.** Find `<|im_start|>assistant\n` and `<|im_end|>` boundaries, mask everything outside. Brittle: breaks the moment you change template, and the boundary tokens themselves are ambiguous (do you train the model to *predict* `<|im_start|>assistant`? You probably want to, but the answer depends on the template).
 
-**Approach B — diff-based: render twice, diff.** This is what [data.py](data.py) uses, and what HuggingFace's TRL SFTTrainer does internally. Render the conversation with `apply_chat_template(messages)` to get the full sequence. Then for each assistant turn, render `apply_chat_template(messages[:assistant_turn])` (everything up to but not including this turn) — the difference between the two lengths is exactly the span where this turn's tokens live. Mask everything else.
+**Approach B — diff-based: render twice, diff.** This is what [data.py](data.py) uses, and the idea behind HuggingFace's TRL completion-only collator. Render the *prefix* up to and including the assistant's generation prompt, and the *full* sequence through the assistant's response. The tokens that appear only in the full sequence are exactly the response — so you mask everything in the prefix (system, user, the `<|im_start|>assistant\n` header, and any template scaffold) and train on what follows.
 
 ```python
-def build_loss_mask(messages, tokenizer):
-    full = tokenizer.apply_chat_template(messages, return_tensors=None)
-    mask = [False] * len(full)
-    for i, msg in enumerate(messages):
-        if msg["role"] != "assistant":
-            continue
-        prefix = tokenizer.apply_chat_template(messages[:i], add_generation_prompt=True)
-        end = tokenizer.apply_chat_template(messages[:i+1])
-        # Tokens at positions [len(prefix), len(end)) are this assistant turn.
-        for p in range(len(prefix), len(end)):
-            mask[p] = True
-    return mask
+def mask_final_turn(messages, tokenizer):
+    """messages[-1] must be the assistant turn we're training on."""
+    full   = tokenizer.apply_chat_template(messages, tokenize=True, return_dict=False)
+    prefix = tokenizer.apply_chat_template(messages[:-1], tokenize=True,
+                                           return_dict=False, add_generation_prompt=True)
+    # Tokens at positions [len(prefix), len(full)) are the assistant's response.
+    is_response = [p >= len(prefix) for p in range(len(full))]
+    return full, is_response
 ```
 
-The diff approach is template-agnostic. It works for Qwen3, Llama 3, Mistral, Gemma, anything HF supports — because it only relies on `apply_chat_template` returning longer strings for longer message lists, which every template does by construction.
+Two details that bite in practice and that [data.py](data.py) handles:
+
+- **`return_dict=False`.** In transformers 5.x, `apply_chat_template(tokenize=True)` returns a `BatchEncoding`, not a flat token list — without this flag the length arithmetic above silently degenerates and the mask comes out empty (the flat-line-loss bug below).
+- **Mask the whole final turn, then expand multi-turn.** A chat template renders an assistant turn *differently* depending on whether it's the last message (Qwen3 only adds its empty `<think></think>` scaffold to the final turn). So the diff is only exact for the **final** assistant turn — looping over every turn and indexing into one `full` render quietly mis-masks earlier turns. [data.py](data.py) sidesteps this by turning a k-turn conversation into k single-target examples (`_render_examples`), each ending at the turn it trains. It also renders with `enable_thinking=False` so that scaffold sits in the masked prefix rather than the loss — and `eval.py` renders identically, so training and inference never disagree.
+
+The approach is template-agnostic in spirit (Qwen3, Llama 3, Mistral, Gemma): it relies only on the prefix being a token-prefix of the full render, which holds for the final turn of any standard template.
 
 **The flat-line loss signature.** If your mask is broken (everything `True`), step 0 will show loss ≈ 0.1-0.5 instead of the 2-4 you'd expect. Why? Because most of the "predictions" are predicting `<|im_start|>` token after `<|im_end|>` — trivial after one update — and you're averaging that over the whole sequence. If you see step 0 loss < 1.0, your mask is wrong. The notebook has a unit test that catches this.
 
@@ -211,6 +213,8 @@ torchrun --standalone --nproc_per_node=8 train.py \
 torchrun --standalone --nproc_per_node=1 train.py \
     --config=configs/sft_demo.yaml
 ```
+
+> **Heads-up on `sft_demo.yaml`:** `model.name` loads with `AutoModelForCausalLM.from_pretrained`, which needs an **HF-format** directory. A Module 11 checkpoint is DCP-sharded, so export it once first (`export_hf.py` in Module 11 — see the comment at the top of [configs/sft_demo.yaml](configs/sft_demo.yaml)). If you skipped Module 11, set `model.name: Qwen/Qwen3-0.6B-Base` to exercise the same path on a small public base.
 
 ## 8. What you should see
 

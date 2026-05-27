@@ -1,0 +1,64 @@
+# Module 14 — SFT — the $0-1 dev / smoke config.
+#
+# SFT your OWN pretrained model: the 150M Qwen3 you trained in Module 11.
+# Runs in minutes on any GPU (even a laptop CPU, slowly) and lets you watch
+# the whole pipeline end-to-end without waiting on a multi-hour run.
+#
+# PREREQUISITE — `model.name` must point at an HF-format directory. A Module 11
+# checkpoint is DCP-sharded, not HF format, so export it once:
+#
+#   cd ../../part-3-pretraining/11-pretraining-in-practice
+#   torchrun --standalone --nproc_per_node=1 export_hf.py \
+#       --checkpoint=results/checkpoints/step_00003000 \
+#       --out=results/export/qwen3-demo
+#
+# Then the relative path below resolves. If you HAVEN'T run Module 11, set
+# `model.name: Qwen/Qwen3-0.6B-Base` instead — a small public base that
+# downloads in seconds and exercises the same code path.
+
+model:
+  name: ../../part-3-pretraining/11-pretraining-in-practice/results/export/qwen3-demo
+  max_seq: 1024
+
+data:
+  source: HuggingFaceH4/no_robots
+  split: train
+  seq_len: 1024
+  batch_size_per_device: 2
+  num_workers: 2
+  pin_memory: true
+  seed: 0
+  chat_template_name: auto
+  system_prompt: ""
+  pack: false
+  max_examples: 500          # cap for a fast smoke run; remove for the full set
+
+optimizer:
+  type: adamw
+  lr: 5.0e-5                 # smaller models tolerate a larger relative LR (README §6)
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+schedule:
+  type: cosine
+  warmup_steps: 10
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 60
+  grad_accum: 4
+  grad_clip: 1.0
+  dtype: bf16                # set fp32 on CPU-only smoke tests
+  activation_checkpointing: false   # the 150M model fits without it
+  log_every: 5
+  save_every: 30
+  eval_every: 0
+  checkpoint_dir: ./results/checkpoints
+  keep_last_n_checkpoints: 2
+  milestone_every: 0
+  wandb_project: ""
+  wandb_entity: ""
+  wandb_run_name: ""
+  wandb_run_id: ""
+  wandb_tags: []

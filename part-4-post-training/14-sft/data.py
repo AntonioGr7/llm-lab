@@ -13,16 +13,21 @@ content of the module lives):
 
 2. **Compute the assistant-only loss mask.** We want cross-entropy on
    tokens the *assistant* generates, not tokens the *user* sends. The
-   `_render_and_mask` helper below uses the "diff trick" — render
-   `apply_chat_template(messages[:i], add_generation_prompt=True)` and
-   `apply_chat_template(messages[:i+1])`, the difference in token count is
-   exactly the span where the i-th assistant turn lives. Mask everything
-   outside those spans as `-100` (the F.cross_entropy ignore_index).
+   `_mask_final_turn` helper uses the "diff trick" — render the prefix
+   `apply_chat_template(messages[:-1], add_generation_prompt=True)` and the
+   full `apply_chat_template(messages)`; the tokens *after* the prefix are
+   exactly the assistant's response. Mask everything in the prefix as `-100`
+   (the F.cross_entropy ignore_index), including the fixed assistant header
+   and any template scaffold (e.g. Qwen3's empty `<think></think>`).
 
-   This approach is **template-agnostic**: it relies only on
-   `apply_chat_template` returning longer outputs for longer message lists,
-   which every Jinja template does by construction. Works for Qwen3,
-   Llama 3, Mistral, Gemma — anything HF supports.
+   The diff is reliable only when the assistant turn is the LAST message —
+   templates render an assistant turn differently mid-conversation vs. as the
+   final turn (Qwen3 adds `<think>` only to the final one), so a naive
+   loop-over-all-turns-into-one-render mis-masks. `_render_examples` therefore
+   expands a k-turn conversation into k single-target examples. The technique
+   itself is template-agnostic (Qwen3, Llama 3, Mistral, Gemma); the only
+   per-template subtlety is suppressed by always masking up to the generation
+   prompt. See `_mask_final_turn` for the full rationale.
 
 The output contract (extends Module 11's data.py with an attention mask):
 
@@ -54,6 +59,39 @@ from config import DataConfig
 # =============================================================================
 
 IGNORE_INDEX = -100   # the F.cross_entropy default for masked positions
+
+
+def _chat_to_ids(tokenizer, messages: list[dict], add_generation_prompt: bool = False) -> list[int]:
+    """Render messages to a flat `list[int]` of token ids.
+
+    Two flags matter:
+
+    1. **`return_dict=False` is load-bearing.** Modern transformers (5.x)
+       returns a `BatchEncoding` (dict-like with `input_ids`/`attention_mask`)
+       from `apply_chat_template(..., tokenize=True)` by default, NOT a bare
+       list. The diff trick is all length arithmetic on flat token lists, so we
+       force the flat-list return. Forget it and every `len(prefix)`/`len(full)`
+       comparison degenerates and the mask silently empties — exactly the
+       "flat-line loss" failure the README §3 warns about.
+
+    2. **`enable_thinking=False`** (Qwen3). Qwen3's template injects an empty
+       `<think>\\n\\n</think>` scaffold into the assistant turn. With thinking
+       enabled the scaffold lands *after* the generation prompt, so the diff
+       trick would train the model to emit empty think blocks — unwanted for
+       non-reasoning SFT (reasoning is Module 16). With it disabled the scaffold
+       moves *into* the generation-prompt prefix, so it is masked and only the
+       real response carries loss. **`eval.py` renders the same way**, so train
+       and inference see identical formatting (the train/inference template
+       mismatch is the second-most-common silent SFT bug — README §2). The kwarg
+       is Qwen-specific; templates that don't accept it raise `TypeError` and we
+       retry without it (the same kwarg is used for both renders, so the
+       strict-prefix property is preserved either way).
+    """
+    base = dict(tokenize=True, return_dict=False, add_generation_prompt=add_generation_prompt)
+    try:
+        return tokenizer.apply_chat_template(messages, enable_thinking=False, **base)
+    except TypeError:
+        return tokenizer.apply_chat_template(messages, **base)
 
 
 def _normalize_to_messages(example: dict, system_prompt: str = "") -> list[dict]:
@@ -93,67 +131,64 @@ def _normalize_to_messages(example: dict, system_prompt: str = "") -> list[dict]
     return messages
 
 
-def _render_and_mask(
+def _mask_final_turn(
     messages: list[dict],
     tokenizer,
     seq_len: int,
 ) -> Optional[dict]:
-    """Render a conversation and compute the assistant-only loss mask.
+    """Render a conversation whose LAST message is the assistant turn to train
+    on, and mask everything except that final turn's response.
 
-    Returns `{input_ids, labels}` both LongTensors of length `seq_len`, or
-    `None` if the conversation has no assistant turns at all (junk row).
+    Returns `{input_ids, labels, attention_mask}` (LongTensors, length
+    `seq_len`), or `None` if the last message isn't an assistant turn or the
+    template misbehaves.
 
     **The diff trick — the central technique of this module:**
 
-    For each assistant message at position `i` in the conversation, we
-    render the prefix (everything before, plus the "generation prompt"
-    that signals 'now the assistant should respond') and the full
-    sequence through this turn. The tokens at positions
-    `[len(prefix), len(through))` are exactly this turn's response —
-    including its closing `<|im_end|>` (or equivalent) which we DO want
-    to predict, so the model learns when to stop.
+    Render the prefix (`messages[:-1]` plus the "generation prompt" that signals
+    'now the assistant responds') and the full sequence. The tokens at positions
+    `[len(prefix), len(full))` are exactly the assistant's response — its text
+    plus the closing `<|im_end|>`, which we DO want to predict so the model
+    learns when to stop. Everything in `prefix` is masked, including the fixed
+    `<|im_start|>assistant\\n` header and any template scaffold (e.g. Qwen3's
+    empty `<think></think>`): the model is *given* those at inference via the
+    generation prompt, so it shouldn't spend loss learning to emit them.
 
-    Causal-LM convention: `labels[t]` is the target the model should
-    predict given `input_ids[:t+1]`. So for input position `t`, the
-    "is-target" flag is whether `position t+1` is an assistant token.
+    **Why only the FINAL turn?** Templates render an assistant turn differently
+    depending on whether it's the last message — Qwen3, for instance, only adds
+    the `<think>` scaffold to the final assistant turn. So `render(messages[:i])`
+    for an *intermediate* assistant turn does not line up token-for-token with
+    its slice of the full multi-turn render, and the naive "loop over all turns
+    and index into one `full`" approach silently mis-masks. Masking only the
+    final turn sidesteps that entirely; `_render_examples` below turns a k-turn
+    conversation into k of these single-target examples, so every assistant turn
+    still gets trained — each in the exact left-context it will see at inference.
+
+    Causal-LM shift: `labels[t]` is the target predicted from `input_ids[:t+1]`,
+    so position `t` carries loss iff `full[t+1]` is an assistant-response token.
     """
-    full = tokenizer.apply_chat_template(messages, tokenize=True)
-    is_assistant_position = [False] * len(full)
-
-    # Mark assistant-token positions in the full sequence.
-    any_assistant = False
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
-            continue
-        any_assistant = True
-        prefix = tokenizer.apply_chat_template(
-            messages[:i], tokenize=True, add_generation_prompt=True,
-        )
-        through = tokenizer.apply_chat_template(
-            messages[:i+1], tokenize=True,
-        )
-        # Sanity: prefix should be a strict prefix of `through`.
-        # If a template misbehaves (rare), we just skip this turn rather
-        # than corrupt the mask.
-        if len(prefix) >= len(through) or len(through) > len(full):
-            continue
-        for p in range(len(prefix), len(through)):
-            is_assistant_position[p] = True
-
-    if not any_assistant:
+    if not messages or messages[-1].get("role") != "assistant":
         return None
 
-    # Causal-LM shift: model predicts input_ids[t+1] from input_ids[:t+1].
-    # `input_ids` is full[:-1], `labels` is full[1:] with non-target
-    # positions zeroed to IGNORE_INDEX.
+    full = _chat_to_ids(tokenizer, messages)
+    prefix = _chat_to_ids(tokenizer, messages[:-1], add_generation_prompt=True)
+
+    # The prefix must line up with the full render token-for-token; if a template
+    # breaks that (rare), skip rather than emit a corrupt mask.
+    if not (0 < len(prefix) < len(full) and full[:len(prefix)] == prefix):
+        return None
+
+    is_response = [False] * len(full)
+    for p in range(len(prefix), len(full)):
+        is_response[p] = True
+
     input_ids = full[:-1]
     raw_labels = full[1:]
-    target_mask = is_assistant_position[1:]   # is *target* (next-token) an assistant token?
+    target_mask = is_response[1:]             # is the NEXT token a response token?
     labels = [t if m else IGNORE_INDEX for t, m in zip(raw_labels, target_mask)]
 
-    # Pad or truncate to `seq_len`. Track which positions are real vs padding
-    # via `attention_mask` (1 for real, 0 for pad) so the model doesn't attend
-    # to padding tokens in self-attention.
+    # Pad or truncate to `seq_len`; `attention_mask` is 1 for real tokens, 0 for
+    # padding so the model's self-attention skips the pad positions we add.
     pad_id = tokenizer.pad_token_id
     if pad_id is None:
         pad_id = tokenizer.eos_token_id
@@ -169,11 +204,38 @@ def _render_and_mask(
         labels = labels + [IGNORE_INDEX] * n_pad
         attention_mask = [1] * n_real + [0] * n_pad
 
+    # If truncation chopped off the entire response (a very long prompt), there's
+    # nothing left to learn from — drop it.
+    if all(l == IGNORE_INDEX for l in labels):
+        return None
+
     return {
         "input_ids": torch.tensor(input_ids, dtype=torch.long),
         "labels": torch.tensor(labels, dtype=torch.long),
         "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
     }
+
+
+def _render_examples(
+    messages: list[dict],
+    tokenizer,
+    seq_len: int,
+) -> list[dict]:
+    """Turn one conversation into one training example per assistant turn.
+
+    A single-turn `(user, assistant)` conversation yields one example. A
+    multi-turn conversation yields one example per assistant turn, each ending
+    at that turn so `_mask_final_turn`'s diff trick is exact. Returns `[]` for a
+    conversation with no assistant turns (a junk row), which the caller drops.
+    """
+    out: list[dict] = []
+    for k, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        sample = _mask_final_turn(messages[:k + 1], tokenizer, seq_len)
+        if sample is not None:
+            out.append(sample)
+    return out
 
 
 # =============================================================================
@@ -229,17 +291,18 @@ class ChatDataset(Dataset):
         if cfg.max_examples is not None:
             raw = raw.select(range(min(cfg.max_examples, len(raw))))
 
-        # Pre-tokenize every example. Rows that produce no assistant tokens
-        # (junk / malformed) are dropped — _render_and_mask returns None.
+        # Pre-tokenize every row into one example per assistant turn (see
+        # _render_examples). Rows that produce no assistant turns (junk /
+        # malformed) contribute nothing and are counted as skipped.
         self.samples: list[dict] = []
         n_skipped = 0
         for example in raw:
             messages = _normalize_to_messages(example, cfg.system_prompt)
-            packed = _render_and_mask(messages, self.tokenizer, cfg.seq_len)
-            if packed is None:
+            examples = _render_examples(messages, self.tokenizer, cfg.seq_len)
+            if not examples:
                 n_skipped += 1
                 continue
-            self.samples.append(packed)
+            self.samples.extend(examples)
 
         if not self.samples:
             raise RuntimeError(
@@ -248,8 +311,9 @@ class ChatDataset(Dataset):
             )
 
         # Useful for the rank-0 startup banner / debugging.
-        self.n_total = len(raw)
-        self.n_skipped = n_skipped
+        self.n_total = len(raw)               # raw rows (conversations)
+        self.n_skipped = n_skipped            # rows with no usable assistant turn
+        self.n_examples = len(self.samples)   # training examples (>= rows for multi-turn)
         self.frac_assistant_tokens = self._compute_assistant_fraction()
 
     def _compute_assistant_fraction(self) -> float:
