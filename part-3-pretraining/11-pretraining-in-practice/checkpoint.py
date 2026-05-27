@@ -89,7 +89,7 @@ def save(
 
 def load(
     model: nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: Optional[torch.optim.Optimizer],
     ckpt_dir: str,
     scheduler: Optional["torch.optim.lr_scheduler.LRScheduler"] = None,
 ) -> int:
@@ -97,6 +97,12 @@ def load(
 
     Returns the number of optimizer updates already completed (use this as
     the start index for the next loop iteration: `for step in range(returned_value, total_steps)`).
+
+    Pass `optimizer=None` for a **weights-only** load (eval / inference): the
+    optimizer state is skipped entirely. This matters because eval rebuilds a
+    throwaway optimizer whose param-group layout need not match training's —
+    attempting to restore the saved optimizer state would raise (mismatched
+    param groups) or silently misattach moments.
 
     The model's current sharding determines how DCP rehydrates the state —
     you can resume on a different number of GPUs than you trained on.
@@ -107,7 +113,6 @@ def load(
     if dist.is_initialized():
         state = {
             "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
             "step": torch.tensor(0),
             "rng_state_cpu": torch.get_rng_state(),
             "rng_state_cuda": [
@@ -115,6 +120,8 @@ def load(
                 for i in range(torch.cuda.device_count())
             ] if torch.cuda.is_available() else [],
         }
+        if optimizer is not None:
+            state["optimizer"] = optimizer.state_dict()
         if scheduler is not None:
             state["scheduler"] = scheduler.state_dict()
         dcp.load(state, checkpoint_id=str(ckpt_path))
@@ -128,7 +135,8 @@ def load(
     else:
         ckpt = torch.load(ckpt_path / "state.pt", map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        if optimizer is not None:
+            optimizer.load_state_dict(ckpt["optimizer"])
         step = int(ckpt["step"])
         if "rng_state_cpu" in ckpt:
             torch.set_rng_state(ckpt["rng_state_cpu"])

@@ -542,7 +542,7 @@ This is the path that requires zero extra steps if you've kept the full `11-pret
 **Option B — convert DCP → `state.pt` once, then load with plain Python.** Better when you want to load the checkpoint in a notebook, hand a single file to someone else, or run on a machine where setting up `torchrun` is annoying. PyTorch ships the converter as a module:
 
 ```bash
-python -m torch.distributed.checkpoint.format_utils dcp_to_torch_save \
+python -m torch.distributed.checkpoint.format_utils dcp_to_torch \
     ./results/checkpoints/step_00003000 \
     ./results/checkpoints/step_00003000/state.pt
 ```
@@ -584,6 +584,30 @@ If the output is gibberish, something is wrong even if perplexity looks fine.
 **3. Downstream benchmarks** — point at lm-evaluation-harness. The demo model is too small to score meaningfully on most benchmarks, but `arc_easy`, `piqa`, `hellaswag` will be at 25–35% (above random, below an instruction-tuned model). The `eval.py --harness` flag prints the lm-eval-harness command to run.
 
 **Perplexity is necessary, not sufficient.** A model can have great perplexity on FineWeb-Edu and still fail on out-of-distribution prompts. Always pair it with generation samples on at least 5 prompts. After post-training you'll lean on benchmarks; for a base model, "does this read like English?" is the honest test.
+
+### Exporting the final model for serving
+
+Once you're happy with a checkpoint — or training has finished — you'll want it in the format inference engines actually read. The DCP shards and the converted `state.pt` are *training* formats; the serving world speaks **HuggingFace `safetensors`**: a directory of `config.json` + `model.safetensors` + tokenizer files that **vLLM**, **SGLang**, and **TGI** all load directly. [`export_hf.py`](export_hf.py) does the repackaging — and because `build_model` returns a real `Qwen3ForCausalLM`, there's no key remapping, just a clean re-save:
+
+```bash
+# from a DCP checkpoint (run under torchrun, like training)
+torchrun --standalone --nproc_per_node=1 export_hf.py \
+    --checkpoint=./results/checkpoints/step_00003000 \
+    --out=./results/export/qwen3-demo
+
+# or from a converted state.pt (plain python — see Option B above)
+python export_hf.py \
+    --checkpoint=./results/checkpoints/step_00003000 \
+    --out=./results/export/qwen3-demo
+```
+
+This writes `config.json`, `model.safetensors` (**bf16** by default — pass `--dtype fp32` to keep full precision), and the tokenizer to `--out`. It also flips `use_cache` back on (training disables it) so the model is generation-ready. The export is weights-only: optimizer/scheduler/RNG state are dropped, since none of it matters for inference. Then serve it with any SOTA engine:
+
+```bash
+vllm serve ./results/export/qwen3-demo --dtype bfloat16   # OpenAI-compatible endpoint on :8000
+```
+
+The exported directory is self-contained — copy it anywhere, push it to the HuggingFace Hub, or hand it to a teammate; nothing in this repo is needed to load it back with `AutoModelForCausalLM.from_pretrained(...)`.
 
 ## 10. Scaling up — 150M → 1B → 7B → 70B
 

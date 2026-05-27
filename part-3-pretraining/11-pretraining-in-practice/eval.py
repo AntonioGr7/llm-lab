@@ -281,9 +281,10 @@ def main():
         return
 
     model = build_model(cfg.model).to(device)
-    # Build a dummy optimizer so load_ckpt has someone to load opt state into.
-    dummy_opt = torch.optim.AdamW(model.parameters(), lr=1e-9)
-    step = load_ckpt(model, dummy_opt, args.checkpoint)
+    # Eval is weights-only: pass optimizer=None so load() skips the optimizer
+    # state. (Training splits params into decay/no_decay groups; reconstructing
+    # that layout here just to discard it would only invite a load mismatch.)
+    step = load_ckpt(model, None, args.checkpoint)
     print(f"[eval] loaded checkpoint at step {step}", flush=True)
 
     if args.slice == "valid":
