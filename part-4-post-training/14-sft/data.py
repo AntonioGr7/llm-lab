@@ -343,7 +343,24 @@ def make_dataloader(cfg: DataConfig, tokenizer_name: str) -> DataLoader:
     """Build the SFT DataLoader. Uses `DistributedSampler` for per-rank sharding
     under torchrun (the standard pattern for map-style datasets). Falls back to
     no sampler when run outside a distributed context.
+
+    On `num_workers`: `ChatDataset` pre-tokenizes the whole corpus into memory at
+    __init__, so `__getitem__` is a pure index op — worker processes add IPC
+    overhead for zero benefit. The default is therefore `num_workers=0`. If you
+    *do* set it >0 (e.g. with the packing stretch goal, or a huge SFT mix where
+    you move tokenization into `__getitem__`), we switch torch's tensor-sharing
+    strategy to `file_system`: the default `file_descriptor` strategy passes one
+    fd per shared tensor, and a few-thousand-example in-memory dataset overruns
+    the forkserver's ~253-fd handoff limit ("ValueError: too many fds").
     """
+    if cfg.num_workers > 0:
+        # Share tensors by filename, not by fd — avoids the "too many fds"
+        # forkserver overflow when many small pre-tokenized tensors cross the
+        # process boundary. (Trade-off: file_system can leak /dev/shm files if a
+        # worker is hard-killed; fine for our short runs.)
+        import torch.multiprocessing as torch_mp
+        torch_mp.set_sharing_strategy("file_system")
+
     dataset = ChatDataset(cfg, tokenizer_name=tokenizer_name)
 
     if dist.is_available() and dist.is_initialized():

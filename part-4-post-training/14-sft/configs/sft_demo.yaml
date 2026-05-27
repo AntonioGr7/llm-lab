@@ -25,7 +25,7 @@ data:
   split: train
   seq_len: 1024
   batch_size_per_device: 2
-  num_workers: 2
+  num_workers: 0             # in-memory pre-tokenized dataset; workers add no value
   pin_memory: true
   seed: 0
   chat_template_name: auto

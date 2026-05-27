@@ -81,7 +81,10 @@ class DataConfig:
     split: str = "train"
     seq_len: int = 2048
     batch_size_per_device: int = 4
-    num_workers: int = 2
+    # 0 is the right default: ChatDataset pre-tokenizes into memory, so worker
+    # processes add IPC overhead with no payoff (and >0 needs the file_system
+    # tensor-sharing strategy to avoid "too many fds" — see make_dataloader).
+    num_workers: int = 0
     pin_memory: bool = True
     seed: int = 0
     # Chat template handling
