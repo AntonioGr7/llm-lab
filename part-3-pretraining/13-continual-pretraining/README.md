@@ -16,7 +16,7 @@ Knowledge acquisition is a **pretraining** phenomenon. It happens through next-t
 
 ## "But 3B tokens can't train a language model"
 
-Correct. You're not training from scratch — that would need *trillions* of tokens to learn language, world knowledge, and reasoning before it ever got to your data. You start from a **finished base model** that already has all of that, and you **continue** its pretraining on a mixture that includes your corpus. The literature calls this **Continued Pre-Training (CPT)**, or **Domain-Adaptive Pretraining (DAPT)** after Gururangan et al.'s 2020 "Don't Stop Pretraining." 3B tokens is far too little to *create* a model and plenty to *adapt* one.
+You're not training from scratch — that would need *trillions* of tokens to learn language, world knowledge, and reasoning before it ever got to your data. You start from a **finished base model** that already has all of that, and you **continue** its pretraining on a mixture that includes your corpus. The literature calls this **Continued Pre-Training (CPT)**, or **Domain-Adaptive Pretraining (DAPT)** after Gururangan et al.'s 2020 "Don't Stop Pretraining." 3B tokens is far too little to *create* a model and plenty to *adapt* one.
 
 The entire difficulty of CPT is one tension:
 
