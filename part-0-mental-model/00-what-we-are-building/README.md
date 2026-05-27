@@ -88,7 +88,7 @@ We're going to train something tiny. Here's the honest comparison.
 
 The ratio is roughly 1:100,000. **But the code is the same shape.** The training loop you write in Part 3 is, structurally, the same loop DeepSeek wrote. The architectural choices (RoPE, SwiGLU, RMSNorm, GQA, MoE) are the same. The data hygiene principles are the same. The post-training stack is the same.
 
-What changes at scale is engineering — multi-GPU communication, FP8 numerical stability, fault tolerance, checkpointing under hardware failure — not concepts. By Module 19 you'll be able to point at exactly what changes and what doesn't.
+What changes at scale is engineering — multi-GPU communication, FP8 numerical stability, fault tolerance, checkpointing under hardware failure — not concepts. By Module 20 you'll be able to point at exactly what changes and what doesn't.
 
 ## The course philosophy
 

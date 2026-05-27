@@ -2,7 +2,7 @@
 
 The engine room.
 
-This is where the course becomes a working pretraining framework. Modules 08–11 collectively build a small but real training stack: a model, a loop, a learning-rate schedule, distributed sharding, a data pipeline, and the orchestration that ties them together. The artifact is a directory you could **lift out of this repo and use to pretrain a SOTA model at any scale** — change the launch flags, not the code.
+This is where the course becomes a working pretraining framework. Modules 08–12 collectively build a small but real training stack: a model, a loop, a learning-rate schedule, distributed sharding, a data pipeline, and the orchestration that ties them together. The artifact is a directory you could **lift out of this repo and use to pretrain a SOTA model at any scale** — change the launch flags, not the code.
 
 A few decisions worth stating up front:
 
@@ -16,6 +16,7 @@ A few decisions worth stating up front:
 - **[09 — The Learning Rate](09-learning-rate/)** — The most important hyperparameter. Warmup, cosine decay, minimum LR. muP transfer from small to large in concrete numbers. Diagnosing LR problems from a loss curve.
 - **[10 — Scaling and Efficiency](10-scaling-and-efficiency/)** — Per-rank memory math, ZeRO stages mapped to FSDP2 sharding choices, activation checkpointing (one line, ~33% FLOPs for most of activation memory), tensor and pipeline parallelism conceptually, DeepSpeed sidebar, DeepSeek's multi-token prediction, and Chinchilla scaling laws as a budgeting tool.
 - **[11 — Pretraining in Practice](11-pretraining-in-practice/)** — The complete, self-contained framework. FineWeb-Edu streaming pipeline, the composed `train.py` (pulls 08's loop + 09's schedule + 10's checkpointing), the demo config (~150M Qwen3, ~3B tokens, Chinchilla-optimal, ~$15–25 on a single A100), `eval.py` for perplexity + generation sanity check + lm-evaluation-harness pointer. The directory you lift out into a new repo.
+- **[12 — Production Data Pipelines](12-production-data-pipelines/)** — The two things Module 11's streaming data loader can't do — checkpoint its position (so resume replays from sample 0) and tokenize only once — and the fix every frontier lab ships: a pre-tokenized binary corpus (`.bin` + index), an explicit permutation shuffle, a memory-mapped map-style dataset with O(1) random access, and a resumable distributed sampler that checkpoints the data position into **one integer** for **O(1) bit-exact resume**. CPU-runnable notebook + a resume-correctness test; drops into Module 11's `train.py` in three edits.
 
 ## What you'll be able to do at the end of this Part
 
@@ -27,8 +28,8 @@ A few decisions worth stating up front:
 
 ## Time and cost
 
-- Reading + coding: ~10 hours.
-- Compute cost: ~$15–25, almost all of it in Module 11. Pre-run checkpoints are committed so you can skip the expensive run if you want.
+- Reading + coding: ~12 hours.
+- Compute cost: ~$15–25, almost all of it in Module 11. Pre-run checkpoints are committed so you can skip the expensive run if you want. Module 12 is **$0** — its lab is CPU-only; building the *full* indexed corpus is optional and costs only CPU time + ~40 GB of disk.
 
 ## Swapping the model
 

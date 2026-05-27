@@ -220,7 +220,7 @@ torchrun --standalone --nproc_per_node=1 train.py \
     --config=configs/demo_h100.yaml --gpu=H100
 ```
 
-Expected wallclock: **~1.2–2 hours** on H100-80GB at ~35–50% MFU. Cost on RunPod (~$2–3/hr for H100): ~$3–6. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
+Expected wallclock: **~1.2–2 hours** on H100-80GB at ~ 35–50% MFU. Cost on RunPod (~ $2–3/hr for H100): ~ $3–6. The `--gpu=H100` flag is only used for the MFU printout — it tells `train.py` to compare against H100's 990 BF16 TFLOPs instead of A100's 312. The training itself reads the dtype and shape from the YAML.
 
 The diff against the A100 demo is **two fields, in this exact order**:
 
@@ -466,7 +466,7 @@ Pretraining is expensive. If a 10-hour run crashes at hour 8, you want the resum
 What this means in practice:
 
 - **For the 3B-token demo**: replaying ~1–3% of tokens after a single mid-run crash is annoying but doesn't meaningfully hurt the final model. Loss curves will look fine.
-- **For frontier-scale runs (T-trillion tokens)**: this *is* a real loss of compute and reproducibility. Frontier teams use data-iterator checkpoints — Megatron-LM and TorchTitan both serialize the position into the global shuffled corpus index. Adding that to `data.py` is ~50 lines but uses internal-API HF `datasets` patterns that aren't stable across versions; we leave it as a stretch goal.
+- **For frontier-scale runs (T-trillion tokens)**: this *is* a real loss of compute and reproducibility. Frontier teams use data-iterator checkpoints — Megatron-LM and TorchTitan both serialize the position into the global shuffled corpus index. **[Module 12 — Production Data Pipelines](../12-production-data-pipelines/) builds exactly this**: a pre-tokenized indexed corpus + a resumable sampler that checkpoints the data position into one integer for O(1) bit-exact resume, with a three-edit drop-in for this `train.py`.
 
 **Verifying the rest**: [`tests/test_resume.py`](tests/test_resume.py) builds a tiny model, runs N steps uninterrupted, then runs N steps with a save-and-reload in the middle, and asserts every loss + LR + parameter + optimizer-state value matches *to zero* between the two runs. Run it any time you change `train.py` or `checkpoint.py`:
 
