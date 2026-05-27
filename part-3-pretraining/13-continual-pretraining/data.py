@@ -175,7 +175,7 @@ if __name__ == "__main__":
         for _ in range(400):
             batch = next(it)
             # a batch is "replay" if its tokens are the replay marker (9)
-            is_r = int(batch["input_ids"][0, 0].item()) == 9
+            is_r = bool((batch["input_ids"] == 9).any())
             n_replay += int(is_r); n_total += 1
         print(f"configured replay_ratio=0.25  realized={n_replay/n_total:.3f} "
               f"({n_replay}/{n_total})")

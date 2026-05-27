@@ -129,21 +129,25 @@ Same `torchrun` contract as the rest of Part 3 — multi-GPU from day one, FSDP2
 ```bash
 # 0. Build the corpus: raw + paraphrase + QA, plus a held-out QA probe set,
 #    tokenized into a Module-12 indexed corpus. Offline & deterministic.
-python make_corpus.py --out results/corpus --n-entities 64 --augment 6 --qa-per-doc 4
+python make_corpus.py --out results/corpus --n-entities 256 --augment 8
 
-# 1. Probe the BASE model first — establish it knows nothing (closed-book QA).
-python eval.py --base Qwen/Qwen3-0.6B-Base --qa results/corpus/qa_heldout.jsonl
+# 1. Probe the BASE first — it should score ~0% on the fiction (the BEFORE).
+python eval.py --base --qa results/corpus/qa_heldout.jsonl
 
 # 2. Continual pretraining (re-warm/re-decay + replay mix), 1 GPU:
 torchrun --standalone --nproc_per_node=1 train.py --config=configs/cpt_qwen3_0.6b.yaml
 
-#    …or 8 GPUs — same code, change the launch flag:
+#    …8 GPUs — same code, drop grad_accum to keep the effective batch sane:
 torchrun --standalone --nproc_per_node=8 train.py --config=configs/cpt_qwen3_0.6b.yaml \
-         --optim.grad_accum=2
+         --training.grad_accum=1
 
-# 3. Re-probe the continually-pretrained model, AND measure forgetting:
-python eval.py --checkpoint results/checkpoints/final \
-               --qa results/corpus/qa_heldout.jsonl --forgetting mmlu,gsm8k --base Qwen/Qwen3-0.6B-Base
+# 3. Re-probe + measure the forgetting bill (acquisition + retention together):
+python eval.py --checkpoint results/checkpoints/step_00000200 \
+               --qa results/corpus/qa_heldout.jsonl --forgetting
+
+#    The "domain only" ablation that demonstrates catastrophic forgetting:
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/cpt_qwen3_0.6b.yaml \
+         --data.replay_ratio=0 --training.checkpoint_dir=./results/ckpt_noreplay
 ```
 
 The `cpt_demo.yaml` config is the ~$0 dev path (tiny corpus, a handful of steps); `cpt_qwen3_0.6b.yaml` is the real ~$1–3 run.

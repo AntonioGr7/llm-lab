@@ -428,7 +428,10 @@ def main():
 
     # 3. Tokenize + write the two indexed corpora.
     if args.fake_tokenizer:
-        tok = WordTokenizer.build(domain_texts + replay)
+        # vocab includes held-out probe text so the offline tokenizer can
+        # encode the probes — held-out text is NOT added to TRAINING (no leak).
+        probe_text = [h["question"] for h in heldout] + [h["answer"] for h in heldout]
+        tok = WordTokenizer.build(domain_texts + replay + probe_text)
         tok.save(str(out / "fake_tokenizer.json"))
         print(f"[make_corpus] fake word tokenizer: vocab_size={tok.vocab_size}")
     else:
