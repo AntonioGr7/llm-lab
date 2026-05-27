@@ -84,7 +84,7 @@ class ScheduleConfig:
 # Data
 # =============================================================================
 
-DataSource = Literal["synthetic", "fineweb_edu"]
+DataSource = Literal["synthetic", "fineweb_edu", "indexed"]
 
 
 @dataclass
@@ -102,6 +102,14 @@ class DataConfig:
     tokenizer_name: str = "Qwen/Qwen3-0.6B"
     fineweb_subset: str = "sample-10BT"  # 10B-token public subset
     shuffle_buffer: int = 10_000
+    # Indexed-corpus knobs (source == "indexed"; see Module 12). Build the
+    # corpus once with `prepare_fineweb_edu.py`, then point `index_prefix` at it.
+    # The indexed loader is map-style with an O(1) bit-exact resumable sampler,
+    # which is why training persists a tiny `data_state.json` next to each
+    # checkpoint — see train.py. `perm_path` is the optional cached epoch-0
+    # permutation (.npy); "" regenerates it from `seed` (cheap below ~10M samples).
+    index_prefix: str = ""               # e.g. "results/corpus/fineweb_1b"
+    perm_path: str = ""                  # optional cached permutation (.npy)
 
 
 # =============================================================================

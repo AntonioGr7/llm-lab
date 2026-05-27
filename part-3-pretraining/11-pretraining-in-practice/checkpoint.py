@@ -42,10 +42,14 @@ def save(
                                       (Python `random` and NumPy aren't used in
                                       our hot path; add them here if you do.)
 
-    NOT persisted (known limitation):
-      - **Data loader position**. Streaming datasets restart from sample 0 on
-        resume; the model replays the first few percent of the corpus. See the
-        README "Resume correctness" subsection for the implications.
+    NOT persisted here (depends on the data source):
+      - **Data loader position**. The streaming source (`fineweb_edu`,
+        `synthetic`) is an IterableDataset with no checkpointable position, so
+        it restarts from sample 0 on resume and the model replays the first few
+        percent of the corpus. See the README "Resume correctness" subsection.
+        The `indexed` source (Module 12) *does* resume bit-exact: `train.py`
+        writes the sampler's one-integer position to a `data_state.json`
+        sidecar next to this checkpoint and seeks to it on restart.
 
     With FSDP2, each rank writes its own shard via DCP. Without distributed,
     falls back to a single `.pt` file via `torch.save`.

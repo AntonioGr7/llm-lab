@@ -180,9 +180,11 @@ python prepare_fineweb_edu.py --source fineweb_edu \
 
 Tokenization is embarrassingly parallel (`multiprocessing.Pool`, one tokenizer per worker), and `imap` keeps memory flat so you can write a 40 GB corpus without 40 GB of RAM.
 
-### Step 2 — drop it into Module 11's `train.py`
+### Step 2 — it's already wired into Module 11
 
-The indexed loader is a near drop-in for Module 11's `make_dataloader`, with one difference: it returns **`(loader, sampler)`**, because the *sampler* owns the resume state. Three small edits to Module 11:
+Module 11 now ships this integration: set `data.source: indexed` and point `data.index_prefix` at your corpus (there's a ready config at [`11-.../configs/demo_indexed.yaml`](../11-pretraining-in-practice/configs/demo_indexed.yaml)). `indexed_dataset.py` and `indexed_data.py` are copied into Module 11's directory — the same "lift it out, copy what you need" pattern Module 11 uses for every other component.
+
+The three edits below are what that wiring *is*, shown so you can replicate it in your own repo. The indexed loader is a near drop-in for Module 11's `make_dataloader`, with one difference that drives all three: it returns **`(loader, sampler)`**, because the *sampler* owns the resume state.
 
 **a) `config.py` — add the source and the corpus path:**
 ```python
@@ -211,19 +213,62 @@ def make_dataloader(cfg, vocab_size):
             num_workers=cfg.num_workers, pin_memory=cfg.pin_memory,
             perm_path=cfg.perm_path or None,
         )                                  # returns (loader, sampler)
-    ...                                    # existing synthetic / fineweb_edu branches
+    ...                                    # existing synthetic / fineweb_edu branches,
+    return loader, None                    # ...now return (loader, None) so the
+                                           #    call site unpacks the same shape
 ```
+Making every branch return `(loader, sampler)` — with `sampler=None` for the streaming/synthetic sources, which have no checkpointable position — is what keeps `train.py`'s call site uniform.
 
 **c) `train.py` — keep the sampler, and checkpoint its one integer.**
-Capture it, persist `sampler.state_dict()` next to the model checkpoint (a tiny `data_state.json` sidecar is the no-touch-DCP option), and restore it on resume:
+Capture it and persist the position to a tiny `data_state.json` sidecar next to the model checkpoint, restored on resume:
 ```python
 loader, sampler = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
 ...
-# on save (rank 0):   json.dump(sampler.state_dict(), open(ckpt_dir/"data_state.json","w"))
-# on resume:          sampler.load_state_dict(json.load(open(resume/"data_state.json")))
+# on save (rank 0):   _write_data_state(sampler, ckpt_path, steps_done, cfg, world)
+# on resume:          _restore_data_state(sampler, resume, start_step, cfg, world, is_main)
 ```
 
-That's it: the same `train.py` loop, now with a data iterator that resumes in O(1). (Tidier still: thread `data_state` through `checkpoint.save`/`load` so it lives inside the DCP checkpoint — left as an exercise; the sidecar is shown here because it touches the least code.)
+**The trap (this is the one thing the naïve version gets wrong).** It is tempting to just `json.dump(sampler.state_dict(), ...)` on save. But with `num_workers>0` the DataLoader **prefetches** `num_workers × prefetch_factor` micro-batches, so `sampler.consumed_samples` has already raced *ahead* of what the training loop actually trained on. Save that live counter and resume **skips** those prefetched batches — silently breaking the bit-exact guarantee that is the entire point of this module. The bug never appears in the isolated sampler test (no workers, no prefetch); it only bites once it's behind a real DataLoader.
+
+The fix: don't trust the live counter — **derive the position from the optimizer-step boundary**, where it's exact and prefetch-independent. One optimizer step consumes `grad_accum` micro-batches of `batch_size_per_device` samples per rank across `world` ranks, so:
+```python
+consumed_samples = steps_done * grad_accum * batch_size_per_device * world
+```
+`_write_data_state` writes *that* value (reusing `state_dict()`'s `seed`/`num_samples` only for the resume-time mismatch guard); `_restore_data_state` reads it back, `load_state_dict` validates the corpus/seed are unchanged, and the sampler seeks there in O(1). Verified bit-exact across a kill-and-resume with `num_workers=2`: loss, grad_norm, and LR are identical to the uninterrupted run, step for step.
+
+(Tidier still: thread `data_state` through `checkpoint.save`/`load` so it lives inside the DCP checkpoint instead of a sidecar — left as an exercise. Note the sidecar lives *inside* the `step_XXXX/` dir, so checkpoint rotation prunes it along with the weights — no orphaned files.)
+
+### Step 3 — re-run and compare (the capstone)
+
+You already trained a model in Module 11 with the **streaming** source. Now train the *same model* on the **indexed** corpus and compare — this is the payoff of the module. The discipline that makes the comparison honest: change **only** `data.source`. Same model shape, same `seed`, same `total_steps`, same tokens/step. [`configs/demo_indexed.yaml`](../11-pretraining-in-practice/configs/demo_indexed.yaml) is `demo_a100.yaml` with that single structural change already made.
+
+```bash
+# A — streaming (what you already ran in Module 11). No prep: it tokenizes as it reads.
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo_a100.yaml
+
+# B — indexed. This path reads integers off disk, so the corpus MUST exist first.
+#   B0 (once, the prerequisite): tokenize ~1B tokens to disk → ~4 GB, ~15-40 min.
+#       --num-docs ~1.1M ≈ 1B tokens at FineWeb-Edu's ~900 tok/doc; watch the
+#       running token counter and stop when it crosses 1B.
+python ../12-production-data-pipelines/prepare_fineweb_edu.py \
+    --source fineweb_edu --output results/corpus/fineweb_1b \
+    --tokenizer Qwen/Qwen3-0.6B --subset sample-10BT --num-docs 1100000 --workers 16
+#   B1: train on it (demo_indexed.yaml's index_prefix already points at fineweb_1b).
+torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo_indexed.yaml
+```
+
+Run B *before* B0 and it fails fast — `data.source='indexed'` with a missing corpus can't open `<prefix>.meta.json`. The prepare step is the line that separates "tokenize every epoch at train time" (A) from "tokenize once, ever" (B) — which is exactly the next question.
+
+**Set expectations first: the two loss curves will not be bit-identical, and that's the lesson, not a bug.** Streaming shuffles a sliding buffer window and packs across that shuffled stream; indexed applies a *global* permutation over fixed-position samples. Different sample orderings → different curves. What you actually compare is four things:
+
+| Signal | What to look for | Why it differs |
+|---|---|---|
+| **tok/s + SM%** | Indexed should be steadier and higher, especially on epoch 2+ | Streaming re-tokenizes every epoch on the CPU and can starve the GPU; indexed reads pre-computed integers off an mmap |
+| **Shuffle quality** | Indexed mixes the whole corpus from step 0; streaming only mixes a `shuffle_buffer` window | Global permutation vs local buffer |
+| **Resume** | Kill both at step N and restart: streaming replays from sample 0; indexed continues exactly (watch the `data position restored` log) | Checkpointable position vs hidden iterator state |
+| **Reproducibility** | Re-run indexed with the same seed → same order every time; streaming's order depends on buffer timing | Explicit permutation vs stream-dependent shuffle |
+
+The resume contrast is the one to actually demonstrate: `Ctrl-C` each run a few hundred steps in, relaunch the same command, and watch streaming's first-batch log replay early data while indexed prints `data position restored: consumed_samples=…` and picks up where it left off.
 
 ---
 

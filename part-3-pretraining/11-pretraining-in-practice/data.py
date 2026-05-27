@@ -29,6 +29,7 @@ import torch.distributed as dist
 from torch.utils.data import IterableDataset, DataLoader
 
 from config import DataConfig
+from indexed_data import make_indexed_dataloader   # Module 12 — source="indexed"
 
 
 # ===========================================================================
@@ -256,14 +257,37 @@ class FineWebEduDataset(IterableDataset):
 # DataLoader construction
 # =============================================================================
 
-def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
+def make_dataloader(cfg: DataConfig, vocab_size: int):
     """Build the DataLoader matching `cfg.source`.
 
-    Both branches return a standard PyTorch DataLoader. The underlying
-    IterableDataset handles per-rank + per-worker sharding internally;
-    no DistributedSampler is needed (and wouldn't work for streaming
-    datasets anyway).
+    Returns `(loader, sampler)`. For the streaming/synthetic sources `sampler`
+    is `None` — those are `IterableDataset`s that shard per-(rank, worker)
+    internally and have no checkpointable position (the limitation Module 12
+    fixes). For `source == "indexed"` the sampler is the
+    `ResumableDistributedSampler`, and it is **not** `None`: it owns the resume
+    position, so `train.py` persists `sampler.state_dict()` alongside the model
+    checkpoint. Callers should unpack the tuple and only touch `sampler` when
+    it isn't `None`.
     """
+    if cfg.source == "indexed":
+        # Map-style, O(1) bit-exact resumable corpus (Module 12). The sampler
+        # is data-parallel-aware, so hand it the DP world/rank. Under FSDP the
+        # data-parallel group is the whole world.
+        world = dist.get_world_size() if dist.is_initialized() else 1
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if not cfg.index_prefix:
+            raise ValueError(
+                "data.source='indexed' requires data.index_prefix to point at a "
+                "corpus built by prepare_fineweb_edu.py (e.g. results/corpus/fineweb_1b)."
+            )
+        return make_indexed_dataloader(
+            cfg.index_prefix, seq_len=cfg.seq_len,
+            micro_batch=cfg.batch_size_per_device,
+            num_replicas=world, rank=rank, seed=cfg.seed,
+            num_workers=cfg.num_workers, pin_memory=cfg.pin_memory,
+            perm_path=cfg.perm_path or None,
+        )                                  # already returns (loader, sampler)
+
     if cfg.source == "synthetic":
         dataset: IterableDataset = SyntheticDataset(
             vocab_size=vocab_size, seq_len=cfg.seq_len,
@@ -280,7 +304,7 @@ def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
     else:
         raise ValueError(
             f"unknown data.source: {cfg.source!r}. "
-            "Supported: 'synthetic', 'fineweb_edu'."
+            "Supported: 'synthetic', 'fineweb_edu', 'indexed'."
         )
 
     # multiprocessing_context: when num_workers > 0, DataLoader spawns workers
@@ -290,7 +314,7 @@ def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
     # from a tiny helper process with no pre-existing threads, so it stays safe.
     mp_context = "forkserver" if cfg.num_workers > 0 else None
 
-    return DataLoader(
+    loader = DataLoader(
         dataset,
         batch_size=cfg.batch_size_per_device,
         num_workers=cfg.num_workers,
@@ -302,6 +326,7 @@ def make_dataloader(cfg: DataConfig, vocab_size: int) -> DataLoader:
         persistent_workers=cfg.num_workers > 0,
         multiprocessing_context=mp_context,
     )
+    return loader, None      # streaming/synthetic have no resumable sampler
 
 
 def cycle(loader: DataLoader) -> Iterator[dict]:
@@ -326,7 +351,7 @@ if __name__ == "__main__":
         source="synthetic", seq_len=64, batch_size_per_device=4,
         synthetic_samples=20, num_workers=0,
     )
-    loader = make_dataloader(syn_cfg, vocab_size=2048)
+    loader, _ = make_dataloader(syn_cfg, vocab_size=2048)
     it = cycle(loader)
     for i in range(3):
         b = next(it)

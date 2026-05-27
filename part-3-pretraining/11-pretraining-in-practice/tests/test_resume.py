@@ -93,7 +93,7 @@ def _build_world(cfg, device: str):
     model = build_model(cfg.model).to(device)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.schedule)
-    loader = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
+    loader, _ = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
     batch_iter = cycle(loader)
     return model, optimizer, scheduler, batch_iter
 
@@ -164,7 +164,7 @@ def run_scenario_B(cfg, device):
     # cycle wrapper re-iterates from sample 0. Because synthetic_samples =
     # SAVE_AT * batch_size, the second pass starts again from sample 0 — same
     # samples the uninterrupted run would have seen at this point.
-    loader = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
+    loader, _ = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
     batch_iter = cycle(loader)
 
     traj_second = _train_block(model, optimizer, scheduler, batch_iter, cfg,

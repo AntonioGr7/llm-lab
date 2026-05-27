@@ -35,6 +35,8 @@ CLI overrides use dotted paths: `--training.grad_accum=1`, `--model.d_model=512`
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import time
 from contextlib import nullcontext
@@ -123,6 +125,58 @@ def _log_startup(rinfo, cfg: TrainConfig, model, device: str) -> None:
     print("=" * 64, flush=True)
 
 
+def _consumed_samples_at(step: int, cfg: TrainConfig, world_size: int) -> int:
+    """Global samples the loop has truly consumed after `step` optimizer updates.
+
+    One optimizer update pulls `grad_accum` micro-batches; each micro-batch is
+    `batch_size_per_device` samples *per rank*, across `world_size` ranks. This
+    is the count we anchor the indexed sampler to on save/resume.
+    """
+    return (step * cfg.training.grad_accum
+            * cfg.data.batch_size_per_device * world_size)
+
+
+def _write_data_state(sampler, ckpt_path: str, steps_done: int,
+                      cfg: TrainConfig, world_size: int) -> None:
+    """Persist the indexed sampler's resume position beside the DCP checkpoint.
+
+    We write the **step-aligned** consumed-sample count, NOT the live
+    `sampler.consumed_samples`. The DataLoader prefetches
+    (`num_workers × prefetch_factor`) micro-batches, so the live counter has
+    already raced ahead of what the loop actually trained on; saving it would
+    make resume *skip* those batches and quietly break the bit-exact guarantee.
+    Derived from the step boundary, the count is exact and prefetch-independent.
+    """
+    if sampler is None:
+        return
+    state = sampler.state_dict()                    # carries seed/num_samples guard
+    state["consumed_samples"] = _consumed_samples_at(steps_done, cfg, world_size)
+    with open(os.path.join(ckpt_path, "data_state.json"), "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def _restore_data_state(sampler, resume_dir: str, start_step: int,
+                        cfg: TrainConfig, world_size: int, is_main: bool) -> None:
+    """Seek the indexed sampler to where the resumed run left off (O(1)).
+
+    Every rank reads the shared `data_state.json`; `load_state_dict` validates
+    that the corpus/seed still match before accepting the position. Checkpoints
+    written before this sidecar existed fall back to deriving the count from
+    `start_step`.
+    """
+    if sampler is None:
+        return
+    sidecar = os.path.join(resume_dir, "data_state.json")
+    if os.path.exists(sidecar):
+        with open(sidecar) as f:
+            sampler.load_state_dict(json.load(f))
+    else:
+        sampler.consumed_samples = _consumed_samples_at(start_step, cfg, world_size)
+    if is_main:
+        print(f"[rank 0] data position restored: "
+              f"consumed_samples={sampler.consumed_samples:,}", flush=True)
+
+
 def main(argv=None):
     args, overrides = _parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -148,7 +202,9 @@ def main(argv=None):
     # ---- 4. Optimizer + scheduler + dataloader ---------------------------
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.schedule)
-    loader = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
+    # `sampler` is None for streaming/synthetic; for source="indexed" it's the
+    # ResumableDistributedSampler that owns the O(1) resume position.
+    loader, sampler = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
     batch_iter = cycle(loader)
 
     # ---- 5. Optional W&B (rank-0 only) -----------------------------------
@@ -192,6 +248,11 @@ def main(argv=None):
     resume = cfg.training.resume_from or latest_ckpt(cfg.training.checkpoint_dir)
     if resume:
         start_step = load_ckpt(model, optimizer, resume, scheduler=scheduler)
+        # Indexed source only: seek the data sampler to the same step boundary so
+        # resume continues bit-exact instead of replaying from sample 0. No-op
+        # (sampler is None) for streaming/synthetic, which can't be seeked.
+        _restore_data_state(sampler, resume, start_step, cfg,
+                            rinfo.world_size, rinfo.is_main)
         if rinfo.is_main:
             print(f"[rank 0] resumed from {resume} at step {start_step}  "
                   f"(scheduler.last_epoch={scheduler.last_epoch}, "
@@ -276,6 +337,9 @@ def main(argv=None):
             ckpt_path = save_ckpt(model, optimizer, steps_done,
                                  cfg.training.checkpoint_dir, scheduler=scheduler)
             if rinfo.is_main:
+                # Sidecar for the indexed data position (no-op if sampler is None).
+                _write_data_state(sampler, ckpt_path, steps_done, cfg,
+                                  rinfo.world_size)
                 deleted = cleanup_old_ckpts(
                     cfg.training.checkpoint_dir,
                     keep_last=cfg.training.keep_last_n_checkpoints,
@@ -295,6 +359,8 @@ def main(argv=None):
             final_path = save_ckpt(model, optimizer, cfg.training.total_steps,
                                   cfg.training.checkpoint_dir, scheduler=scheduler)
             if rinfo.is_main:
+                _write_data_state(sampler, final_path, cfg.training.total_steps,
+                                  cfg, rinfo.world_size)
                 cleanup_old_ckpts(
                     cfg.training.checkpoint_dir,
                     keep_last=cfg.training.keep_last_n_checkpoints,

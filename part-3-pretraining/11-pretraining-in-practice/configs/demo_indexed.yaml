@@ -1,0 +1,96 @@
+# Module 11 — Pretraining in Practice — the INDEXED twin of demo_a100.yaml.
+#
+# Same model, same optimizer/schedule, same token budget as demo_a100.yaml.
+# The ONLY change is the data source: instead of streaming + tokenizing
+# FineWeb-Edu on the fly, this reads a pre-tokenized binary corpus you built
+# with Module 12's prepare_fineweb_edu.py. That buys the two things streaming
+# can't give you (Module 12 §1):
+#
+#   - O(1) bit-exact resume — a crash resumes exactly where it left off, no
+#     replay. The sampler's position is checkpointed to a `data_state.json`
+#     sidecar next to each model checkpoint (see train.py).
+#   - The tokenizer runs ZERO times during training (it ran once, in prepare).
+#
+# This is the config for the A/B capstone in Module 12: train demo_a100.yaml
+# (streaming) and this one (indexed) with everything else held constant, then
+# compare tok/s, shuffle quality, and resume behavior.
+#
+# ---------------------------------------------------------------------------
+# BEFORE you run this, build the corpus once (a few hours for 10BT on 16 cores,
+# or minutes for a 1B-token slice — see Module 12 §9):
+#
+#   python ../12-production-data-pipelines/prepare_fineweb_edu.py \
+#       --source fineweb_edu --output results/corpus/fineweb_1b \
+#       --tokenizer Qwen/Qwen3-0.6B --subset sample-10BT \
+#       --num-docs 1100000 --workers 16
+#
+# Then point `data.index_prefix` below at that prefix. Run with:
+#
+#   torchrun --standalone --nproc_per_node=1 train.py --config=configs/demo_indexed.yaml
+# ---------------------------------------------------------------------------
+
+model:
+  vocab_size: 151936       # Qwen3 tokenizer (must match the tokenizer used in prepare)
+  d_model: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 2            # GQA(6x)
+  d_ffn: 2048              # ~2.67x d_model
+  max_seq: 2048
+  rope_theta: 10000.0
+  tie_weights: true
+  norm_eps: 1.0e-6
+
+optimizer:
+  type: adamw
+  lr: 3.0e-4
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+schedule:
+  type: cosine
+  warmup_steps: 200
+  min_lr_ratio: 0.1
+
+data:
+  source: indexed          # <-- the only structural difference from demo_a100.yaml
+  seq_len: 2048
+  batch_size_per_device: 8
+  num_workers: 2
+  pin_memory: true
+  seed: 0                  # the permutation seed; resume validates this hasn't changed
+  # Point this at the corpus prefix you built with prepare_fineweb_edu.py.
+  # The loader opens <prefix>.bin / .idx.npy / .meta.json.
+  index_prefix: results/corpus/fineweb_1b
+  # Optional cached epoch-0 permutation (prepare_fineweb_edu.py --write-perm).
+  # "" regenerates it from `seed` in milliseconds — fine below ~10M samples.
+  perm_path: ""
+
+training:
+  # tokens/step is identical to demo_a100.yaml:
+  #   = batch * grad_accum * world_size * seq_len
+  #   = 8 * 64 * 1 * 2048 ≈ 1.05M tokens/step  on  1 GPU
+  # × 3000 steps ≈ 3.15B tokens. Holding this constant is what makes the
+  # streaming-vs-indexed comparison apples-to-apples.
+  #
+  # NOTE: a 1B-token corpus is ~488k samples at seq_len 2048; 3.15B tokens is
+  # ~3.2 epochs over it. Multi-epoch is exactly when indexed pays off (the
+  # tokenizer ran once; the shuffle reseeds per epoch). For a single-epoch run,
+  # build a bigger corpus or lower total_steps.
+  total_steps: 3000
+  grad_accum: 64           # set to 8 on an 8-GPU node (keeps tokens/step constant)
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: true
+  log_every: 10
+  save_every: 500
+  eval_every: 0
+  checkpoint_dir: ./results/checkpoints_indexed
+  keep_last_n_checkpoints: 3
+  milestone_every: 1000
+  wandb_project: ""        # e.g. "llm-lab-pretrain"; tag runs to compare streaming vs indexed
+  wandb_entity: ""
+  wandb_run_name: ""
+  wandb_run_id: ""
+  wandb_tags: []           # e.g. ["demo", "indexed", "150M"]
