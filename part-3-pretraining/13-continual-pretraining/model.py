@@ -1,9 +1,10 @@
-"""Model builder for Module 14 — SFT.
+"""Model builder for Module 13 — Continual Pretraining.
 
-The single biggest difference from Module 11's `model.py`: pretraining
-*constructs* a randomly-initialized model from geometry knobs, SFT *loads*
-a fully-pretrained checkpoint. So `build_model` here is a thin wrapper over
-`AutoModelForCausalLM.from_pretrained`.
+Copied from Module 15. The key difference from Module 11's `model.py`:
+pretraining *constructs* a randomly-initialized model from geometry knobs;
+continual pretraining *loads* a finished base checkpoint and keeps training it.
+So `build_model` here is a thin wrapper over `AutoModelForCausalLM.from_pretrained`
+— the base whose knowledge you're about to extend (default `Qwen3-0.6B-Base`).
 
 **The framework's contract is the same as Module 11:**
 

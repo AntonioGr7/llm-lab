@@ -1,4 +1,4 @@
-"""Optimizer construction for Module 14 — SFT.
+"""Optimizer construction for Module 15 — SFT.
 
 Adapted from Module 11's `optim.py`, trimmed to the single path SFT needs:
 **AdamW** with a decay / no-decay param split.
@@ -44,7 +44,7 @@ def build_optimizer(
     """
     if cfg.type != "adamw":
         raise ValueError(
-            f"Module 14 ships AdamW only; got optimizer.type={cfg.type!r}. "
+            f"Module 15 ships AdamW only; got optimizer.type={cfg.type!r}. "
             "See the module docstring for how to add Muon back."
         )
     return _build_adamw(model, cfg, param_groups)

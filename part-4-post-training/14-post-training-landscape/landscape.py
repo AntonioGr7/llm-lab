@@ -1,8 +1,8 @@
 """
-landscape.py — tiny utilities for the Module 13 notebook.
+landscape.py — tiny utilities for the Module 14 notebook.
 
-This module has no training code. Module 13 is the concepts/map module for Part 4;
-the actual post-training runs start in Module 14. These helpers exist so the
+This module has no training code. Module 14 is the concepts/map module for Part 4;
+the actual post-training runs start in Module 15. These helpers exist so the
 notebook can demonstrate the three things every student should see before they
 write a line of post-training code:
 
@@ -17,7 +17,7 @@ write a line of post-training code:
 
 CPU-friendly. The default model pair is Qwen3-0.6B-Base / Qwen3-0.6B — ~600M
 parameters each, slow on CPU but bearable for a handful of short generations.
-On a GPU it's instant. The fine-tuning runs themselves (Modules 14-17) target
+On a GPU it's instant. The fine-tuning runs themselves (Modules 15-18) target
 Qwen3-1.7B on a single A100/H100.
 """
 

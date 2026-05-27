@@ -1,4 +1,4 @@
-"""Data pipeline for Module 14 — Supervised Fine-Tuning.
+"""Data pipeline for Module 15 — Supervised Fine-Tuning.
 
 Two responsibilities, both unique to SFT (this is where the new pedagogical
 content of the module lives):
@@ -78,7 +78,7 @@ def _chat_to_ids(tokenizer, messages: list[dict], add_generation_prompt: bool = 
        `<think>\\n\\n</think>` scaffold into the assistant turn. With thinking
        enabled the scaffold lands *after* the generation prompt, so the diff
        trick would train the model to emit empty think blocks — unwanted for
-       non-reasoning SFT (reasoning is Module 16). With it disabled the scaffold
+       non-reasoning SFT (reasoning is Module 17). With it disabled the scaffold
        moves *into* the generation-prompt prefix, so it is masked and only the
        real response carries loss. **`eval.py` renders the same way**, so train
        and inference see identical formatting (the train/inference template

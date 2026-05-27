@@ -335,4 +335,4 @@ Ordered by how directly it maps to this module's code:
 
 ---
 
-*Previous: [11 — Pretraining in Practice](../11-pretraining-in-practice/). This module closes the data-loader-resume gap that module's checkpointing flagged. Next: [Part 4 — Post-Training](../../part-4-post-training/).*
+*Previous: [11 — Pretraining in Practice](../11-pretraining-in-practice/). This module closes the data-loader-resume gap that module's checkpointing flagged. Next: [13 — Continual Pretraining](../13-continual-pretraining/) — the indexed corpus you just built is exactly what a continual-pretraining run mixes against general-data replay.*

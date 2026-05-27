@@ -8,11 +8,11 @@ This is where the modern field has shifted. Pretraining costs are eye-watering b
 
 ## Modules
 
-- **[13 — The Post-Training Landscape](13-post-training-landscape/)** — Why a base model is unusable. The alignment tax. The full post-training stack as practiced at labs.
-- **[14 — Supervised Fine-Tuning (SFT)](14-sft/)** — What SFT does to the weight space. LoRA and QLoRA. Chat templates. Demo: SFT on your pretrained model, then on Qwen3-1.7B.
-- **[15 — Preference Optimization](15-preference-optimization/)** — Why SFT alone is not enough. RLHF in one slide. DPO as the practical replacement. IPO and KTO variants. Demo: DPO on Qwen3-1.7B.
-- **[16 — Reasoning and GRPO](16-reasoning-and-grpo/)** — Chain-of-thought as a training target. GRPO (the DeepSeek-R1 technique). Reward design for reasoning. Demo: GRPO on GSM8K subset, watching reasoning emerge.
-- **[17 — Distillation](17-distillation/)** — Transferring capability through token-level supervision. Three flavors, each fixing a limitation of the previous:
+- **[14 — The Post-Training Landscape](14-post-training-landscape/)** — Why a base model is unusable. The alignment tax. The full post-training stack as practiced at labs.
+- **[15 — Supervised Fine-Tuning (SFT)](15-sft/)** — What SFT does to the weight space. LoRA and QLoRA. Chat templates. Demo: SFT on your pretrained model, then on Qwen3-1.7B.
+- **[16 — Preference Optimization](16-preference-optimization/)** — Why SFT alone is not enough. RLHF in one slide. DPO as the practical replacement. IPO and KTO variants. Demo: DPO on Qwen3-1.7B.
+- **[17 — Reasoning and GRPO](17-reasoning-and-grpo/)** — Chain-of-thought as a training target. GRPO (the DeepSeek-R1 technique). Reward design for reasoning. Demo: GRPO on GSM8K subset, watching reasoning emerge.
+- **[18 — Distillation](18-distillation/)** — Transferring capability through token-level supervision. Three flavors, each fixing a limitation of the previous:
   - **Offline distillation** (R1-Distill style) — SFT on teacher samples. Simple, powerful, but off-policy: the student is trained on a distribution it won't see at inference.
   - **On-policy distillation** — student generates rollouts, teacher provides token-level supervision on the student's own distribution. Fixes the off-policy problem, but you still need a separate (larger) teacher.
   - **Self-Distillation Fine-Tuning (SDFT)** — the new technique from [Shenfeld et al., 2026](https://arxiv.org/abs/2601.19897). The *same* model is its own teacher when conditioned on demonstrations, giving you on-policy learning from demonstrations without needing rewards or a separate teacher. Substantially reduces catastrophic forgetting and enables continual learning. We'll demo it on a small skill-acquisition task and show how it stacks against plain SFT.

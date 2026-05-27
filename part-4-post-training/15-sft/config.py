@@ -1,4 +1,4 @@
-"""The composed config for Module 14 — Supervised Fine-Tuning.
+"""The composed config for Module 15 — Supervised Fine-Tuning.
 
 Mirrors Module 11's `config.py` structure (single source of truth, YAML
 loader, dotted CLI overrides) but with sections rewritten for SFT:
@@ -112,7 +112,7 @@ class OptimizerConfig:
     - `lr: 1e-5` is ~30× smaller than the 3e-4 we used in Module 11.
       The base model is already at a good point in weight space; we're
       nudging it, not rebuilding it. Large LRs in this regime cause
-      catastrophic forgetting (the "alignment tax" from Module 13).
+      catastrophic forgetting (the "alignment tax" from Module 14).
       See README §6 for the full LR discussion.
 
     - `betas[1] = 0.999` instead of the 0.95 we used in pretraining.
@@ -295,7 +295,7 @@ def _coerce(raw: str, ann):
 if __name__ == "__main__":
     cfg = TrainConfig()
     cfg.sync()
-    print("--- TrainConfig defaults (Module 14 SFT) ---")
+    print("--- TrainConfig defaults (Module 15 SFT) ---")
     for section_name in ("model", "data", "optimizer", "schedule", "training"):
         section = getattr(cfg, section_name)
         print(f"\n[{section_name}]")

@@ -1,0 +1,56 @@
+# Module 13 — Continual Pretraining — fast smoke config.
+#
+# Same model and pipeline as cpt_qwen3_0.6b.yaml, but only a handful of steps:
+# use it to confirm the whole loop runs end-to-end (corpus loads, model loads,
+# the mix interleaves, loss goes down, a checkpoint is written) before you
+# commit to the longer run. Minutes on any GPU.
+#
+#   python make_corpus.py --out results/corpus --n-entities 32 --augment 4
+#   torchrun --standalone --nproc_per_node=1 train.py --config=configs/cpt_demo.yaml
+#
+# For a FULLY OFFLINE ($0, no download) version of this loop on a tiny random
+# model, see notebook.ipynb — it uses make_corpus.py --fake-tokenizer.
+
+model:
+  name: Qwen/Qwen3-0.6B-Base
+  max_seq: 1024
+
+data:
+  domain_prefix: results/corpus/domain
+  replay_prefix: results/corpus/replay
+  replay_ratio: 0.25
+  seq_len: 512
+  batch_size_per_device: 4
+  num_workers: 2
+  pin_memory: true
+  seed: 0
+  qa_heldout: results/corpus/qa_heldout.jsonl
+
+optimizer:
+  type: adamw
+  lr: 5.0e-5
+  betas: [0.9, 0.95]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+schedule:
+  type: cosine
+  warmup_steps: 5
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 30
+  grad_accum: 2
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: false
+  log_every: 5
+  save_every: 30
+  checkpoint_dir: ./results/checkpoints_demo
+  keep_last_n_checkpoints: 2
+  milestone_every: 0
+  wandb_project: ""
+  wandb_entity: ""
+  wandb_run_name: ""
+  wandb_run_id: ""
+  wandb_tags: []

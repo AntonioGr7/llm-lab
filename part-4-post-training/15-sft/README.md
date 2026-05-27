@@ -1,6 +1,6 @@
-# Module 14 — Supervised Fine-Tuning (SFT)
+# Module 15 — Supervised Fine-Tuning (SFT)
 
-You finished Part 3 with a base model. You finished [Module 13](../13-post-training-landscape/) understanding *why* a base model is unusable as a product. This is where you do the first thing about it.
+You finished Part 3 with a base model. You finished [Module 14](../14-post-training-landscape/) understanding *why* a base model is unusable as a product. This is where you do the first thing about it.
 
 **SFT is the canonical post-training operation:** take a pretrained base model, fine-tune *all* its weights on curated `(prompt, response)` demonstrations, end up with an instruction-following model. Every frontier lab does this as their first post-training step. It's the same cross-entropy loss you used in pretraining, the same optimizer, the same FSDP wrap — but applied to chat-formatted data and masked so only the assistant's response counts toward the loss.
 
@@ -11,7 +11,7 @@ The two new pedagogical ideas in this module:
 
 This module is **full fine-tuning only** — every weight in the model updates. LoRA / QLoRA / DoRA and other parameter-efficient methods are their own module later in Part 4, because the techniques deserve a focused treatment rather than being a "config flag" on top of the full-FT pipeline. Full FT first, parameter-efficient variants once you understand what they're being efficient *about*.
 
-Like Module 11, this is a **framework directory** — lift it out, point it at your own data and base model, you have a working SFT codebase. Modules 15-17 (preference optimization, GRPO, distillation) will all build on this same pipeline rather than starting fresh.
+Like Module 11, this is a **framework directory** — lift it out, point it at your own data and base model, you have a working SFT codebase. Modules 16-18 (preference optimization, GRPO, distillation) will all build on this same pipeline rather than starting fresh.
 
 ## The thesis
 
@@ -19,7 +19,7 @@ Post-training is **data-bound, not compute-bound**. The SFT *algorithm* is ident
 
 - The data is no longer raw web text; it's curated `(prompt, response)` pairs that demonstrate the behavior you want.
 - The loss is no longer applied to every token; it's masked to *only* the assistant's response tokens.
-- The base model is no longer random init; it's a fully-pretrained checkpoint, and you want to *change it as little as possible* while still acquiring chat behavior. This is where the "alignment tax" from Module 13 lives, and it's why your SFT learning rate is ~30-100× smaller than what you used in pretraining.
+- The base model is no longer random init; it's a fully-pretrained checkpoint, and you want to *change it as little as possible* while still acquiring chat behavior. This is where the "alignment tax" from Module 14 lives, and it's why your SFT learning rate is ~30-100× smaller than what you used in pretraining.
 
 If you internalize those three differences, you understand SFT. Everything else is engineering.
 
@@ -33,7 +33,7 @@ If you internalize those three differences, you understand SFT. Everything else 
 ## 1. Directory layout
 
 ```
-14-sft/
+15-sft/
 ├── README.md              you are here
 ├── notebook.ipynb         CPU-only tour: the loss mask, one step, memory, loss curve
 ├── config.py              TrainConfig — model, data, optimizer, schedule, training
@@ -54,7 +54,7 @@ If you internalize those three differences, you understand SFT. Everything else 
 └── results/               pre-run loss curves + checkpoint for the canonical run
 ```
 
-Every component is either NEW (introduced in this module) or COPIED from Module 11. The "framework directory" promise from Module 11 holds: you can `cp -r 14-sft/ ~/my-sft-repo/` and have a complete SFT codebase.
+Every component is either NEW (introduced in this module) or COPIED from Module 11. The "framework directory" promise from Module 11 holds: you can `cp -r 15-sft/ ~/my-sft-repo/` and have a complete SFT codebase.
 
 ## 2. Chat templates
 
@@ -138,7 +138,7 @@ Fits on a single A100-80GB with ~40 GB of headroom for batch scaling and PyTorch
 **Why not just use LoRA and dodge the memory math?** A few reasons that matter pedagogically:
 
 1. **Full FT is what frontier labs do.** Read any major lab's technical report (Llama 3, Qwen3, DeepSeek-V3) — their SFT stage is full FT. LoRA is a *resource-constrained* substitute, not the canonical operation. Teaching LoRA first inverts that and gives a misleading mental model of the field.
-2. **Full FT exposes the alignment tax.** When you watch all 1.7B params shift, you can measure how far the model drifts from its base capability — that's the alignment-tax measurement we set up in Module 13. With LoRA, you can't see this because the base weights never move.
+2. **Full FT exposes the alignment tax.** When you watch all 1.7B params shift, you can measure how far the model drifts from its base capability — that's the alignment-tax measurement we set up in Module 14. With LoRA, you can't see this because the base weights never move.
 3. **LoRA has its own pedagogical content** worth a dedicated module: the low-rank assumption, the merge-back step, QLoRA's NF4 quantization, DoRA, etc. Trying to cover it as a config flag on top of this module would compress it into a footnote.
 
 If you're cost-constrained and want to run SFT on a 7B+ model, jump ahead to the LoRA module and come back. The current module is the conceptual foundation; LoRA is the efficiency layer on top.
@@ -185,7 +185,7 @@ In pretraining (Module 11) we used a peak LR of 3e-4. Here we're at 1e-5 — abo
 
 **Pretraining** moves the model from random init toward whatever the data implies. Every update is a *large* directional change because the model has nothing to lose; the gradient signal is the only information about where in weight space "good" lives.
 
-**SFT** starts from a model that's already at a good point in weight space. The job is to nudge it toward a *specific* nearby point (the instruction-following one) without destroying the existing capability. Large LRs in this regime are catastrophic: they overshoot the local optimum, and you end up with a model that has good chat format but has forgotten how to do math, code, or recall facts. The literature calls this **catastrophic forgetting**; Module 13 framed it as the **alignment tax**.
+**SFT** starts from a model that's already at a good point in weight space. The job is to nudge it toward a *specific* nearby point (the instruction-following one) without destroying the existing capability. Large LRs in this regime are catastrophic: they overshoot the local optimum, and you end up with a model that has good chat format but has forgotten how to do math, code, or recall facts. The literature calls this **catastrophic forgetting**; Module 14 framed it as the **alignment tax**.
 
 The right SFT LR is roughly **"as small as it can be while still moving the loss"**. Common values:
 
@@ -249,4 +249,4 @@ In order of "read this first":
 
 ## 11. What's next
 
-[Module 15 — Preference Optimization](../15-preference-optimization/) — SFT teaches the model *what to say*; preference optimization teaches it *how to choose between things to say*. We layer DPO on top of the SFT checkpoint you produce here.
+[Module 16 — Preference Optimization](../16-preference-optimization/) — SFT teaches the model *what to say*; preference optimization teaches it *how to choose between things to say*. We layer DPO on top of the SFT checkpoint you produce here.

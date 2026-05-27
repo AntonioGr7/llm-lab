@@ -8,7 +8,7 @@ Most courses bolt evaluation onto the end of a fine-tuning notebook as an aftert
 
 ## Modules
 
-- **[18 — Evaluation That Actually Means Something](18-evaluation/)** — Why perplexity is necessary but not sufficient. Standard benchmarks and where they lie. LLM-as-judge. Vibe evals vs systematic evals. Contamination — the dirty secret of benchmark scores. How labs actually evaluate models internally vs what they publish.
+- **[19 — Evaluation That Actually Means Something](19-evaluation/)** — Why perplexity is necessary but not sufficient. Standard benchmarks and where they lie. LLM-as-judge. Vibe evals vs systematic evals. Contamination — the dirty secret of benchmark scores. How labs actually evaluate models internally vs what they publish.
 
 ## What you'll be able to do at the end of this Part
 

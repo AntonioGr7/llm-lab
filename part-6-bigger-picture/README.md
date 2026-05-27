@@ -8,8 +8,8 @@ This Part is short, conceptual, and easy to skip. We strongly suggest you don't.
 
 ## Modules
 
-- **[19 — Reading the Literature](19-reading-the-literature/)** — How to read a paper in 30 minutes and extract what matters. The papers that actually matter — a curated reading list. How to identify a genuine advance vs noise. Reproducing a result as the most important skill nobody teaches.
-- **[20 — Scaling Intuitions](20-scaling-intuitions/)** — What changes and what doesn't when you scale. The resource allocation problem (model size vs data vs compute). Why the $50 course prepares you for the $50M run. What labs actually hire for in applied roles. Personal projects that signal real understanding.
+- **[20 — Reading the Literature](20-reading-the-literature/)** — How to read a paper in 30 minutes and extract what matters. The papers that actually matter — a curated reading list. How to identify a genuine advance vs noise. Reproducing a result as the most important skill nobody teaches.
+- **[21 — Scaling Intuitions](21-scaling-intuitions/)** — What changes and what doesn't when you scale. The resource allocation problem (model size vs data vs compute). Why the $50 course prepares you for the $50M run. What labs actually hire for in applied roles. Personal projects that signal real understanding.
 
 ## What you'll be able to do at the end of this Part
 

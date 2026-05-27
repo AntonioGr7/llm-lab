@@ -1,0 +1,70 @@
+# Module 13 — Continual Pretraining — the canonical demo config.
+#
+# Inject a fictional company's knowledge into Qwen3-0.6B-Base, then prove (with
+# eval.py's held-out QA) that the base knew nothing and this model does — while
+# measuring how much general capability you paid for it (retention perplexity).
+#
+# 1. Build the corpus (raw docs + paraphrases + train-QA + held-out probes):
+#      python make_corpus.py --out results/corpus --n-entities 256 --augment 8
+#    For a GENUINE replay mix, repoint data.replay_prefix at the FineWeb-Edu
+#    indexed corpus you built in Module 12 — real general data is what actually
+#    preserves general capability; the synthetic replay only keeps the demo $0.
+#
+# 2. Probe the base FIRST (it should score ~0 on the fiction):
+#      python eval.py --base --qa results/corpus/qa_heldout.jsonl
+#
+# 3. Continual pretraining — single A100, ~$1-3, minutes:
+#      torchrun --standalone --nproc_per_node=1 train.py --config=configs/cpt_qwen3_0.6b.yaml
+#
+# 4. Re-probe + measure forgetting:
+#      python eval.py --checkpoint results/checkpoints/step_00000200 \
+#          --qa results/corpus/qa_heldout.jsonl --forgetting
+#
+# NOTE ON EPOCHS: at this toy scale the corpus is small, so total_steps repeats
+# it well past the ~4-epoch rule of thumb (README lever 4). That's a scale
+# artifact of the demo, not the recipe — with a real multi-B-token corpus you'd
+# stay under ~4 epochs. Sweep total_steps / optimizer.lr against eval.py.
+
+model:
+  name: Qwen/Qwen3-0.6B-Base
+  max_seq: 1024
+
+data:
+  domain_prefix: results/corpus/domain
+  replay_prefix: results/corpus/replay     # repoint at Module 12's FineWeb-Edu for a real run
+  replay_ratio: 0.25                        # 25% of tokens are general replay (lever 1)
+  seq_len: 512                              # fictional docs are short; 512 packs ~5-6 per sample
+  batch_size_per_device: 8
+  num_workers: 2
+  pin_memory: true
+  seed: 0
+  qa_heldout: results/corpus/qa_heldout.jsonl
+
+optimizer:
+  type: adamw
+  lr: 5.0e-5                # the RE-WARM PEAK — ~10-30% of a from-scratch peak (lever 2)
+  betas: [0.9, 0.95]        # pretraining betas (CPT is pretraining), not SFT's 0.999
+  eps: 1.0e-8
+  weight_decay: 0.0         # short small-corpus demo; a real run uses ~0.1
+
+schedule:
+  type: cosine              # warmup = "re-warm", cosine tail = "re-decay"
+  warmup_steps: 20          # ~10% of the run; the model is trained, not random
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 200
+  grad_accum: 4             # eff_batch = bs(8) * grad_accum(4) * world(1) = 32
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: false   # 0.6B fits comfortably; AC only costs speed here
+  log_every: 10
+  save_every: 100
+  checkpoint_dir: ./results/checkpoints
+  keep_last_n_checkpoints: 3
+  milestone_every: 0
+  wandb_project: ""         # e.g. "llm-lab-cpt"
+  wandb_entity: ""
+  wandb_run_name: ""
+  wandb_run_id: ""
+  wandb_tags: []

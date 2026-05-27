@@ -1,4 +1,4 @@
-"""The Module 14 SFT entrypoint. Launch via `torchrun`.
+"""The Module 15 SFT entrypoint. Launch via `torchrun`.
 
 ```
 # Single A100-80GB (still goes through torchrun) — the canonical demo
@@ -59,7 +59,7 @@ _GPU_PEAK_TFLOPS = {"A100": 312, "H100": 990, "V100": 125}
 
 def _parse_args(argv):
     p = argparse.ArgumentParser(
-        description="Module 14 SFT entrypoint",
+        description="Module 15 SFT entrypoint",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -101,7 +101,7 @@ def _log_startup(rinfo, cfg: TrainConfig, model, frac_assistant: float, device: 
         * cfg.training.grad_accum * rinfo.world_size
     )
     print("=" * 64)
-    print("Module 14 — Supervised Fine-Tuning")
+    print("Module 15 — Supervised Fine-Tuning")
     print("=" * 64)
     print(f"world_size: {rinfo.world_size}   device: {device}   dtype: {cfg.training.dtype}")
     print(f"base model: {cfg.model.name}   params: {counts['total']/1e6:.1f}M "

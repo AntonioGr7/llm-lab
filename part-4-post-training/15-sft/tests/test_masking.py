@@ -1,4 +1,4 @@
-"""Correctness tests for the SFT loss mask — the heart of Module 14.
+"""Correctness tests for the SFT loss mask — the heart of Module 15.
 
 The assistant-only loss mask is the single most common silent bug in homemade
 SFT pipelines (README §3). These tests pin the properties the README claims,
@@ -22,7 +22,7 @@ Properties:
   4. Normalization. Heterogeneous dataset shapes map to canonical messages.
 
 Usage:
-    cd 14-sft/
+    cd 15-sft/
     python tests/test_masking.py
 
 Exits 0 on pass, 1 on fail.

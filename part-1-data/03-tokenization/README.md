@@ -146,7 +146,7 @@ A small set of reserved tokens at the top of the vocabulary, used for control fl
 |---|---|---|
 | `<|endoftext|>` (BOS/EOS) | Start/end of document, sequence separator | Every training sample, every generation |
 | `<|pad|>` | Padding for fixed-length batches | Padded shorter sequences in a batch |
-| `<|im_start|>`, `<|im_end|>` | Chat turn boundaries (ChatML format) | Post-training / SFT (Module 13) |
+| `<|im_start|>`, `<|im_end|>` | Chat turn boundaries (ChatML format) | Post-training / SFT (Module 15) |
 | `<|user|>`, `<|assistant|>`, `<|system|>` | Role markers in chat | Post-training |
 | Tool / function-calling tokens | Various; format depends on the model | Tool-using models |
 

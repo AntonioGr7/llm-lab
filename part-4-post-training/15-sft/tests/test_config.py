@@ -1,10 +1,10 @@
-"""Config-loader tests for Module 14.
+"""Config-loader tests for Module 15.
 
 Cheap guards that the YAML configs parse, cross-section invariants propagate,
 and the dotted CLI overrides coerce types correctly. No network, no models.
 
 Usage:
-    cd 14-sft/
+    cd 15-sft/
     python tests/test_config.py
 """
 from __future__ import annotations
