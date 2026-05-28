@@ -36,9 +36,9 @@ Each gap maps to a specific post-training technique:
 
 | Gap         | Technique                  | Module |
 |-------------|----------------------------|--------|
-| Format      | SFT (instruction tuning)   | 13     |
-| Refusal     | Preference optimization    | 14     |
-| Reasoning   | RL with verifiable rewards | 15     |
+| Format      | SFT (instruction tuning)   | 15     |
+| Refusal     | Preference optimization    | 16     |
+| Reasoning   | RL with verifiable rewards | 17     |
 
 The fourth lever — **distillation** — is orthogonal: it's how you move any of these behaviors from a big model into a small one (Module 18).
 
@@ -179,10 +179,10 @@ Every remaining module in this Part follows the same pattern:
 
 | Module | Technique | Time | Approx cost (RunPod/Lambda) |
 |--------|-----------|------|------------------------------|
-| 13     | SFT + LoRA | 1-2h | $2-4 |
-| 14     | DPO + LoRA | 2-3h | $4-6 |
-| 15     | GRPO | 4-8h | $8-15 |
-| 16     | Distillation (3 flavors) | 3-5h total | $6-10 |
+| 15     | SFT (full FT) | 1-2h | $3-5 |
+| 16     | DPO / IPO | 2-3h | $4-6 |
+| 17     | GRPO | 4-8h | $8-15 |
+| 18     | Distillation (3 flavors) | 3-5h total | $6-10 |
 
 Whole Part 4 runs comfortably in $20-30 of GPU credits if you do every module yourself. If you just want to read and play with the released checkpoints, $0.
 

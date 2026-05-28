@@ -9,7 +9,7 @@ This is where the modern field has shifted. Pretraining costs are eye-watering b
 ## Modules
 
 - **[14 — The Post-Training Landscape](14-post-training-landscape/)** — Why a base model is unusable. The alignment tax. The full post-training stack as practiced at labs.
-- **[15 — Supervised Fine-Tuning (SFT)](15-sft/)** — What SFT does to the weight space. LoRA and QLoRA. Chat templates. Demo: SFT on your pretrained model, then on Qwen3-1.7B.
+- **[15 — Supervised Fine-Tuning (SFT)](15-sft/)** — What SFT does to the weight space. Chat templates. Assistant-only loss masking. Full fine-tuning only (LoRA / QLoRA deferred to a dedicated module). Demo: full-FT Qwen3-1.7B-Base.
 - **[16 — Preference Optimization](16-preference-optimization/)** — Why SFT alone is not enough. RLHF in one slide. DPO as the practical replacement. IPO and KTO variants. Demo: DPO on Qwen3-1.7B.
 - **[17 — Reasoning and GRPO](17-reasoning-and-grpo/)** — Chain-of-thought as a training target. GRPO (the DeepSeek-R1 technique). Reward design for reasoning. Demo: GRPO on GSM8K subset, watching reasoning emerge.
 - **[18 — Distillation](18-distillation/)** — Transferring capability through token-level supervision. Three flavors, each fixing a limitation of the previous:
@@ -27,4 +27,4 @@ This is where the modern field has shifted. Pretraining costs are eye-watering b
 ## Time and cost
 
 - Reading + coding: ~15 hours.
-- Compute cost: ~$20–30, with most of it in Modules 16 (GRPO is sample-hungry) and 17 (on-policy methods need student rollouts at every step).
+- Compute cost: ~$20–30, with most of it in Modules 17 (GRPO is sample-hungry) and 18 (on-policy methods need student rollouts at every step).

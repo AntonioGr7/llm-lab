@@ -1,0 +1,53 @@
+# Demo DPO run — Qwen3-0.6B (already SFT'd by Qwen), a tiny slice of
+# ultrafeedback_binarized, ~50 steps. Goal: exercise the whole codepath
+# end-to-end in a few minutes on any GPU. NOT for producing a usable model.
+#
+# Why Qwen3-0.6B rather than the 1.7B? Two models in memory at FT scale
+# is the DPO memory pinch point. 0.6B keeps the entire dev loop under 10 GB
+# of VRAM — runs on a free Colab GPU or a 16 GB consumer card. The same
+# code path scales to the 1.7B canonical run with no edits.
+#
+# Cost: $0-1 on any GPU; ~3-5 minutes wallclock.
+
+model:
+  name: Qwen/Qwen3-0.6B            # already SFT'd by Qwen — DPO refines from there
+  ref_name: ""                     # "" -> use model.name as reference
+  max_seq: 512
+
+data:
+  source: HuggingFaceH4/ultrafeedback_binarized
+  split: train_prefs
+  seq_len: 512
+  batch_size_per_device: 2
+  num_workers: 0
+  pin_memory: true
+  max_examples: 200                # tiny slice, just to exercise the pipeline
+
+preference:
+  loss_type: dpo
+  beta: 0.1
+  label_smoothing: 0.0
+  reference_free: false
+
+optimizer:
+  type: adamw
+  lr: 1.0e-6                       # slightly higher than the 1.7B canonical — smaller model
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+schedule:
+  type: cosine
+  warmup_steps: 5
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 50
+  grad_accum: 2
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: true
+  log_every: 5
+  save_every: 25
+  keep_last_n_checkpoints: 2
+  checkpoint_dir: ./results/checkpoints_demo
