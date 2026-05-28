@@ -79,7 +79,13 @@ def forward_loss(
             # `[B, S, V]` logits tensor. Memory peak at the loss step drops
             # ~5x at vocab=151,936 — the binding constraint for this model
             # size on an H100. See README §11 for the rationale.
-            out = model(input_ids=input_ids, labels=labels)
+            #
+            # `return_dict=True` is passed to silence a deprecation warning:
+            # Liger's `lce_forward` still falls back to `self.config.use_return_dict`
+            # when `return_dict` is None, and that property is deprecated in
+            # transformers 5.x (use `config.return_dict`). Passing it explicitly
+            # skips the fallback.
+            out = model(input_ids=input_ids, labels=labels, return_dict=True)
             return out.loss
 
         out = model(input_ids=input_ids)
