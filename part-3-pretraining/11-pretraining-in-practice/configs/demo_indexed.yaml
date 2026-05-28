@@ -83,6 +83,7 @@ training:
   grad_clip: 1.0
   dtype: bf16
   activation_checkpointing: true
+  use_fused_ce: true       # Liger fused linear+CE — the A100 memory wall is already shown by demo_a100.yaml; this run focuses on the indexed-vs-streaming comparison
   log_every: 10
   save_every: 500
   eval_every: 0
