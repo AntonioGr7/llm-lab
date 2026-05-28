@@ -176,6 +176,15 @@ class TrainingConfig:
     dtype: Dtype = "bf16"
     # Full FT of 1.7B on A100-80GB doesn't fit without AC — see README §4.
     activation_checkpointing: bool = True
+    # Fused linear + cross-entropy via Liger Kernel. When True, the LM head's
+    # matmul is fused with cross-entropy in a chunked Triton kernel that never
+    # materializes the full `[B, S, V]` logits tensor — the dominant memory
+    # cost at large vocab (Qwen3 = 151,936). Same lever as Module 11's
+    # `use_fused_ce`; here it dispatches by `model.config.model_type` so it
+    # works for any Liger-supported HF arch. Liger honors `ignore_index=-100`
+    # so the assistant-only loss mask from `data.py` still works.
+    # Off by default — flip on if you want to drop AC or push micro-batch up.
+    use_fused_ce: bool = False
     log_every: int = 10
     save_every: int = 200
     eval_every: int = 0                     # 0 = disabled

@@ -170,6 +170,15 @@ class TrainingConfig:
     grad_clip: float = 1.0
     dtype: Dtype = "bf16"
     activation_checkpointing: bool = False
+    # Fused linear + cross-entropy via Liger Kernel. When True, the LM head's
+    # matmul is fused with cross-entropy in a chunked Triton kernel that never
+    # materializes the full `[B, S, V]` logits tensor — the dominant memory
+    # cost at large vocab (Qwen3 = 151,936). Same lever as Module 11's
+    # `use_fused_ce`; here it dispatches by `model.config.model_type` so it
+    # works for any Liger-supported HF arch (Qwen3 / Llama / Mistral / Gemma).
+    # Off by default — flip on if you scale the base model up and hit the
+    # memory wall (README §"Scaling up" in Module 11).
+    use_fused_ce: bool = False
     log_every: int = 10
     save_every: int = 200
     checkpoint_dir: str = "./results/checkpoints"

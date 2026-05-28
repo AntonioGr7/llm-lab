@@ -97,6 +97,8 @@ def _log_startup(rinfo, cfg, model, mixed, tokens_per_step, device):
     print(f"training:   total_steps={cfg.training.total_steps}  "
           f"grad_accum={cfg.training.grad_accum}  seq_len={cfg.data.seq_len}  "
           f"tokens/step={tokens_per_step:,}")
+    print(f"            activation_checkpointing={cfg.training.activation_checkpointing}  "
+          f"fused_ce={cfg.training.use_fused_ce}")
     print(f"checkpoints: {cfg.training.checkpoint_dir}  every {cfg.training.save_every}")
     print("=" * 70, flush=True)
 
@@ -117,7 +119,7 @@ def main(argv=None):
     mixed = make_mixed_loader(cfg.data, num_replicas=rinfo.world_size, rank=rinfo.rank)
 
     # ---- 4. Model + efficiency + sharding --------------------------------
-    model = build_model(cfg.model).to(device)
+    model = build_model(cfg.model, fused_ce=cfg.training.use_fused_ce).to(device)
     if cfg.training.activation_checkpointing:
         apply_activation_checkpointing(model)
     model = apply_fsdp(model, dtype=cfg.training.dtype)
@@ -183,6 +185,7 @@ def main(argv=None):
             model=model, optimizer=optimizer, batch_iter=batch_iter,
             grad_accum=cfg.training.grad_accum, grad_clip=cfg.training.grad_clip,
             dtype=cfg.training.dtype, device=device,
+            fused_ce=cfg.training.use_fused_ce,
         )
         scheduler.step()
 

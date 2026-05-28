@@ -118,7 +118,8 @@ def _log_startup(rinfo, cfg: TrainConfig, model, frac_assistant: float, device: 
           f"eff_batch={cfg.data.batch_size_per_device*cfg.training.grad_accum*rinfo.world_size}  "
           f"tokens/step={tokens_per_step:,}")
     print(f"            grad_clip={cfg.training.grad_clip}  "
-          f"activation_checkpointing={cfg.training.activation_checkpointing}")
+          f"activation_checkpointing={cfg.training.activation_checkpointing}  "
+          f"fused_ce={cfg.training.use_fused_ce}")
     print(f"checkpoints: {cfg.training.checkpoint_dir}  every {cfg.training.save_every}")
     print("=" * 64, flush=True)
 
@@ -144,7 +145,7 @@ def main(argv=None):
     # ---- 4. Build model, apply efficiency + sharding ---------------------
     # Order matters: activation_checkpointing wraps each decoder layer; FSDP
     # then shards the wrapped layer. Reverse order silently breaks FSDP.
-    model = build_model(cfg.model).to(device)
+    model = build_model(cfg.model, fused_ce=cfg.training.use_fused_ce).to(device)
     if cfg.training.activation_checkpointing:
         apply_activation_checkpointing(model)
     model = apply_fsdp(model, dtype=cfg.training.dtype)
@@ -224,6 +225,7 @@ def main(argv=None):
             grad_clip=cfg.training.grad_clip,
             dtype=cfg.training.dtype,
             device=device,
+            fused_ce=cfg.training.use_fused_ce,
         )
         scheduler.step()
 

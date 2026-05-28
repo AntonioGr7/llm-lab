@@ -40,13 +40,22 @@ import torch.nn as nn
 from config import ModelConfig
 
 
-def build_model(cfg: ModelConfig) -> nn.Module:
+def build_model(cfg: ModelConfig, fused_ce: bool = False) -> nn.Module:
     """Load a pretrained HF causal LM for full fine-tuning.
 
     Args:
         cfg: which model to load (`name`) and the max sequence length we'll
             train at (`max_seq`, used only to set `max_position_embeddings`
             sanity, not to resize anything).
+        fused_ce: if True, patches the underlying HF causal-LM class with
+            Liger Kernel's fused linear + cross-entropy *before* loading
+            weights. The patched model exposes the same forward(input_ids,
+            attention_mask, labels=) API, but when `labels` are passed the
+            LM head matmul is fused with CE in a chunked Triton kernel — the
+            full `[B, S, V]` logits tensor is never materialized. Liger's
+            kernel honors `ignore_index=-100`, so the assistant-only loss
+            mask from `data.py` still applies. Mirrors Module 11's
+            `use_fused_ce`; see `loop.py` for the loop-side branch.
 
     Returns:
         An `AutoModelForCausalLM` in FP32 with `use_cache=False`, every
@@ -54,7 +63,31 @@ def build_model(cfg: ModelConfig) -> nn.Module:
         its decoder layers live in `model.model.layers` (Qwen3 / Llama /
         Mistral / Gemma all satisfy this).
     """
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    if fused_ce:
+        # Patch must happen BEFORE `from_pretrained(...)` instantiates the
+        # model — Liger patches the class, not the instance. Unlike Module 11
+        # we don't know the arch a priori (`cfg.name` can be Qwen3/Llama/etc.)
+        # so we peek at the HF config to dispatch on `model_type`. We only flip
+        # `fused_linear_cross_entropy` and leave the other Liger patches
+        # (RoPE, RMSNorm, SwiGLU) off to minimize the blast radius — those
+        # change numerics subtly and aren't what's saving you the memory.
+        try:
+            from liger_kernel.transformers.monkey_patch import _apply_liger_kernel
+        except ImportError as e:
+            raise ImportError(
+                "training.use_fused_ce=true requires `pip install liger-kernel`."
+            ) from e
+        model_type = AutoConfig.from_pretrained(cfg.name).model_type
+        _apply_liger_kernel(
+            model_type=model_type,
+            rope=False,
+            rms_norm=False,
+            swiglu=False,
+            cross_entropy=False,                # we want the *fused* variant, not the standalone CE patch
+            fused_linear_cross_entropy=True,
+        )
 
     model = AutoModelForCausalLM.from_pretrained(
         cfg.name,

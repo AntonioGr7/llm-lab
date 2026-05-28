@@ -32,13 +32,20 @@ def forward_loss(
     batch: dict,
     dtype: str = "bf16",
     device: str = "cuda",
+    fused_ce: bool = False,
 ) -> torch.Tensor:
     """One forward pass under autocast; returns the scalar loss tensor.
 
-    Computes cross-entropy against the assistant-masked labels from
-    `data.py`. Padding positions in `labels` are already -100 (CE ignores
-    them); we additionally pass `attention_mask` to the model so its
-    self-attention skips padding tokens.
+    Default path (`fused_ce=False`): the model is called WITHOUT `labels=`,
+    we read `out.logits`, and compute `F.cross_entropy(..., ignore_index=-100)`
+    out here. `data.py` zeroes out non-assistant positions to -100 in
+    `labels`, so CE averages only over assistant tokens.
+
+    Fused path (`fused_ce=True`): the model has been patched by Liger Kernel
+    (see `model.build_model`) so that passing `labels=` triggers a fused
+    linear+CE Triton kernel inside the LM head. The `[B, S, V]` logits tensor
+    never exists. Liger's kernel honors `ignore_index=-100`, so the
+    assistant-only mask still applies. We just consume `out.loss`.
 
     The model contract is identical to Module 11: any module with
     `forward(input_ids, attention_mask=...) -> (.logits)` works. HF causal
@@ -54,6 +61,19 @@ def forward_loss(
     ctx = (torch.autocast(device_type=device, dtype=_DTYPE[dtype])
            if dtype != "fp32" else nullcontext())
     with ctx:
+        if fused_ce:
+            # Liger-patched model: loss is computed inside the model using a
+            # fused linear+CE Triton kernel that never materializes the
+            # `[B, S, V]` logits tensor. `return_dict=True` silences a
+            # transformers 5.x deprecation in Liger's `lce_forward` fallback.
+            out = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                return_dict=True,
+            )
+            return out.loss
+
         out = model(input_ids=input_ids, attention_mask=attention_mask)
         logits = out.logits if hasattr(out, "logits") else out
 
@@ -72,6 +92,7 @@ def train_step(
     grad_clip: float,
     dtype: str = "bf16",
     device: str = "cuda",
+    fused_ce: bool = False,
 ) -> tuple[float, float]:
     """One full optimizer step = `grad_accum` micro-batches. Mirrors Module 11.
 
@@ -93,7 +114,8 @@ def train_step(
 
     for accum_idx in range(grad_accum):
         batch = next(batch_iter)
-        loss = forward_loss(model, batch, dtype=dtype, device=device) / grad_accum
+        loss = forward_loss(model, batch, dtype=dtype, device=device,
+                            fused_ce=fused_ce) / grad_accum
 
         # FSDP: skip cross-rank gradient sync on all but the last micro-batch.
         is_last = (accum_idx == grad_accum - 1)
