@@ -73,16 +73,20 @@ We recommend **RunPod** for this course. Simplest mental model: pick a GPU, pick
 
 ### RunPod (recommended)
 
+The 30-second version:
+
 1. Sign up at [runpod.io](https://runpod.io). Add a credit card. Top up with $25 to start.
 2. Templates → **"RunPod PyTorch 2.x"** (latest version, CUDA 12).
 3. GPU → **A100 80GB** for serious runs; **A40 48GB** for lighter modules; **A100 40GB** if 80GB is unavailable.
-4. Storage → 50 GB persistent volume. Cheap, survives pod restarts, worth it.
+4. Storage → 50 GB persistent network volume. Cheap, survives pod restarts, worth it.
 5. Deploy. SSH in. Verify:
 
 ```bash
 nvidia-smi          # should show the A100
 nvcc --version      # CUDA 12.x
 ```
+
+**Full walkthrough** — account setup, SSH keys, network volumes, a reusable `~/.ssh/config` entry, and the shut-down discipline that keeps the $50 budget intact: [runpod-setup.md](runpod-setup.md). Do this once, then you can spin up a pod in 90 seconds for every module after.
 
 ### Lambda Labs (alternative)
 
