@@ -219,24 +219,7 @@ def make_dataloader(cfg, vocab_size):
 ```
 Making every branch return `(loader, sampler)` — with `sampler=None` for the streaming/synthetic sources, which have no checkpointable position — is what keeps `train.py`'s call site uniform.
 
-**c) `train.py` — keep the sampler, and checkpoint its one integer.**
-Capture it and persist the position to a tiny `data_state.json` sidecar next to the model checkpoint, restored on resume:
-```python
-loader, sampler = make_dataloader(cfg.data, vocab_size=cfg.model.vocab_size)
-...
-# on save (rank 0):   _write_data_state(sampler, ckpt_path, steps_done, cfg, world)
-# on resume:          _restore_data_state(sampler, resume, start_step, cfg, world, is_main)
-```
-
-**The trap (this is the one thing the naïve version gets wrong).** It is tempting to just `json.dump(sampler.state_dict(), ...)` on save. But with `num_workers>0` the DataLoader **prefetches** `num_workers × prefetch_factor` micro-batches, so `sampler.consumed_samples` has already raced *ahead* of what the training loop actually trained on. Save that live counter and resume **skips** those prefetched batches — silently breaking the bit-exact guarantee that is the entire point of this module. The bug never appears in the isolated sampler test (no workers, no prefetch); it only bites once it's behind a real DataLoader.
-
-The fix: don't trust the live counter — **derive the position from the optimizer-step boundary**, where it's exact and prefetch-independent. One optimizer step consumes `grad_accum` micro-batches of `batch_size_per_device` samples per rank across `world` ranks, so:
-```python
-consumed_samples = steps_done * grad_accum * batch_size_per_device * world
-```
-`_write_data_state` writes *that* value (reusing `state_dict()`'s `seed`/`num_samples` only for the resume-time mismatch guard); `_restore_data_state` reads it back, `load_state_dict` validates the corpus/seed are unchanged, and the sampler seeks there in O(1). Verified bit-exact across a kill-and-resume with `num_workers=2`: loss, grad_norm, and LR are identical to the uninterrupted run, step for step.
-
-(Tidier still: thread `data_state` through `checkpoint.save`/`load` so it lives inside the DCP checkpoint instead of a sidecar — left as an exercise. Note the sidecar lives *inside* the `step_XXXX/` dir, so checkpoint rotation prunes it along with the weights — no orphaned files.)
+**c) `train.py` — checkpoint the sampler's `consumed_samples`** alongside the model weights, and restore it on resume. That's the integration point where §5's O(1) bit-exact claim becomes real: one integer in, one integer out.
 
 ### Step 3 — re-run and compare (the capstone)
 

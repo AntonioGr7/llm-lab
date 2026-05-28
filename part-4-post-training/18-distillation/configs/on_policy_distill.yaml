@@ -1,0 +1,65 @@
+# On-policy distillation (GKD-style) — Qwen3-1.7B teacher to Qwen3-0.6B student.
+# Uses the REAL Hermes/Glaive function-calling corpus (run prepare_tooluse_corpus.py first).
+#
+# The student rolls out on its OWN distribution; the larger teacher provides
+# per-token logits on those rollouts; the student matches via forward KL.
+# This fixes the off-policy problem of offline distillation (training on the
+# teacher's distribution, then deploying the student on its own different
+# one).
+#
+# Compute cost: dominated by holding two models in memory (1.7B + 0.6B at FP32
+# master + BF16 compute) and by the teacher's per-step forward.
+#
+# Expected wallclock on a single A100-80GB: ~1-2 hours for 200 steps.
+# Cost: ~$2-4 on RunPod / Lambda Labs.
+
+model:
+  name: Qwen/Qwen3-0.6B            # the STUDENT — smaller; gets trained
+  teacher_name: Qwen/Qwen3-1.7B    # the TEACHER — larger; frozen; scores student rollouts
+  max_seq: 2048                    # smaller seq budget — no demo prefix
+
+data:
+  corpus_dir: ./data
+  prompts_per_step: 4
+  seq_len: 2048
+  num_workers: 0
+  pin_memory: true
+  gsm8k_source: openai/gsm8k
+  gsm8k_subset: main
+  gsm8k_split: test
+  gsm8k_n_eval: 100
+
+distill:
+  mode: on_policy                  # student rolls out; separate teacher scores
+  n_demonstrations: 0              # not used in on_policy
+  kl_direction: forward
+  temperature: 1.0
+  top_k_kl: 0
+  sampling_temperature: 0.9
+  top_p: 0.95
+  max_new_tokens: 128
+
+optimizer:
+  type: adamw
+  lr: 5.0e-5                       # higher than SDFT — smaller student, plain teacher signal
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+schedule:
+  type: cosine
+  warmup_steps: 20
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 200
+  grad_accum: 1
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: true   # two models in memory
+  log_every: 1
+  save_every: 50
+  eval_every: 50
+  eval_n_gsm8k: 50
+  keep_last_n_checkpoints: 3
+  checkpoint_dir: ./results/checkpoints_on_policy
