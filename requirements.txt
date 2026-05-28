@@ -24,6 +24,8 @@ matplotlib==3.10.9
 
 
 liger-kernel==0.8.0
-pynvml==13.0.1
+# NVIDIA's official NVML bindings. Imported as `import pynvml` (same module
+# name as the deprecated third-party `pynvml` package on PyPI).
+nvidia-ml-py==13.580.65
 # Note: per-module dependencies (e.g. trl for DPO/GRPO, peft for LoRA)
 # will be added as we introduce them in later modules.
