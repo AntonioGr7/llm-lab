@@ -1,0 +1,23 @@
+# Module 03a — Curating SFT Data (optional, extra module)
+#
+# These deps are NOT in the top-level requirements.txt because they are only
+# needed if you actually want to run the curation pipeline. Install them only
+# when you're using this module:
+#
+#     pip install -r requirements.txt
+#
+# Versions pinned to what was tested when the module was built.
+
+# Language identification on Italian/non-Italian text.
+# The fastText lid.176 model (~125 MB) is downloaded on first use.
+fasttext-wheel==0.9.2
+
+# MinHash + LSH for near-duplicate detection on millions of rows.
+datasketch==1.10.0
+
+# Multilingual sentence embeddings for diversity-aware downsampling.
+# The default model used is sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2.
+sentence-transformers==5.5.1
+
+# k-means clustering for diversity downsampling; vectorized cosine math.
+scikit-learn==1.8.0

@@ -23,12 +23,12 @@ We anchor on DeepSeek-V3 and Qwen 3.6 1.7B because their architectures, training
 
 ## Course structure
 
-Six Parts, twenty-two modules. The order is deliberate.
+Six Parts, twenty-two modules plus one optional extra. The order is deliberate.
 
 | Part | Topic | Modules |
 |---|---|---|
 | [Part 0](part-0-mental-model/) | Mental Model | 00–01 |
-| [Part 1](part-1-data/) | Data | 02–03 |
+| [Part 1](part-1-data/) | Data | 02–03 (+ optional 03a) |
 | [Part 2](part-2-architecture/) | Architecture | 04–07 |
 | [Part 3](part-3-pretraining/) | Pretraining | 08–13 |
 | [Part 4](part-4-post-training/) | Post-Training | 14–18 |
