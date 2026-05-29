@@ -130,9 +130,39 @@ def write_jsonl(path: Path, rows: Iterable[Row]) -> int:
     return n
 
 
+def read_jsonl(path: Path) -> list[Row]:
+    out: list[Row] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
 def write_report(path: Path, report: dict) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
+
+
+def read_report(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _checkpoint_paths(out_path: Path) -> dict[str, Path]:
+    """Compute the standard checkpoint file paths derived from --out."""
+    stem = out_path.with_suffix("")  # strip .jsonl
+    return {
+        "stage_1_3_rows":   Path(f"{stem}.stage_1_3.jsonl"),
+        "stage_1_3_report": Path(f"{stem}.stage_1_3.report.json"),
+        "stage_4a_rows":    Path(f"{stem}.stage_4a.jsonl"),
+        "stage_4a_report": Path(f"{stem}.stage_4a.report.json"),
+    }
 
 
 def main() -> None:
@@ -192,6 +222,12 @@ def main() -> None:
                       help="Rows per worker chunk (default: %(default)s). "
                            "Larger = less IPC overhead, worse load balance.")
 
+    res = p.add_argument_group("resume")
+    res.add_argument("--no-resume", action="store_true",
+                     help="Ignore any existing stage checkpoints and rerun from scratch.")
+    res.add_argument("--keep-checkpoints", action="store_true",
+                     help="Don't delete stage_1_3 / stage_4a checkpoint files after a successful run.")
+
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
@@ -223,32 +259,78 @@ def main() -> None:
         "calques": args.skip_calques,
     }
 
-    log(f"=== Stage 1–3: per-row filters ===")
-    log(f"  source         : {args.local_jsonl or args.dataset}")
-    log(f"  target language: {args.target_lang}")
-    log(f"  limit          : {args.limit}")
-    log(f"  workers        : {args.workers if args.workers > 0 else 'auto'}")
-    log(f"  chunk size     : {args.chunk_size}")
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ckpt = _checkpoint_paths(out_path)
 
-    t0 = time.time()
-    total, source_iter = load_source(
-        dataset=args.dataset, split=args.split, streaming=args.streaming,
-        local_jsonl=args.local_jsonl, limit=args.limit,
-    )
-    if total is not None:
-        log(f"  expected rows : {total:,}")
-    kept, report = run_per_row_filters_parallel(
-        source_iter,
-        structural=s_cfg, lang=l_cfg, artifact=a_cfg, skip=skip_flags,
-        n_workers=args.workers, chunk_size=args.chunk_size,
-        progress=not args.quiet, total=total, desc="stage 1-3",
-    )
-    log(report.summary())
-    log(f"  wallclock: {time.time() - t0:.1f}s")
+    # Pre-flight: detect existing checkpoints (unless --no-resume).
+    have_stage_1_3 = (not args.no_resume) and ckpt["stage_1_3_rows"].exists()
+    have_stage_4a  = (not args.no_resume) and ckpt["stage_4a_rows"].exists()
 
-    # Stage 4 — MinHash dedup.
+    # Stage 1-3 — run or load from checkpoint.
+    stage_1_3_meta: dict = {}
+    if have_stage_4a:
+        # Skip both 1-3 and 4a; we'll load 4a below.
+        kept = []
+        stage_1_3_meta = (read_report(ckpt["stage_1_3_report"]) if ckpt["stage_1_3_report"].exists() else {})
+        log("=== Resume: stage 4a checkpoint found, skipping stages 1-3 + 4a ===")
+        log(f"  -> {ckpt['stage_4a_rows']}")
+    elif have_stage_1_3:
+        log("=== Resume: stage 1-3 checkpoint found, skipping stages 1-3 ===")
+        log(f"  loading {ckpt['stage_1_3_rows']}")
+        t0 = time.time()
+        kept = read_jsonl(ckpt["stage_1_3_rows"])
+        stage_1_3_meta = read_report(ckpt["stage_1_3_report"]) if ckpt["stage_1_3_report"].exists() else {
+            "kept": len(kept),
+            "total": len(kept),
+            "drops": {},
+            "note": "stage_1_3 report not found — drop counts unknown (resume)",
+        }
+        log(f"  loaded {len(kept):,} rows in {time.time()-t0:.1f}s")
+    else:
+        log(f"=== Stage 1–3: per-row filters ===")
+        log(f"  source         : {args.local_jsonl or args.dataset}")
+        log(f"  target language: {args.target_lang}")
+        log(f"  limit          : {args.limit}")
+        log(f"  workers        : {args.workers if args.workers > 0 else 'auto'}")
+        log(f"  chunk size     : {args.chunk_size}")
+
+        t0 = time.time()
+        total, source_iter = load_source(
+            dataset=args.dataset, split=args.split, streaming=args.streaming,
+            local_jsonl=args.local_jsonl, limit=args.limit,
+        )
+        if total is not None:
+            log(f"  expected rows : {total:,}")
+        kept, report = run_per_row_filters_parallel(
+            source_iter,
+            structural=s_cfg, lang=l_cfg, artifact=a_cfg, skip=skip_flags,
+            n_workers=args.workers, chunk_size=args.chunk_size,
+            progress=not args.quiet, total=total, desc="stage 1-3",
+        )
+        log(report.summary())
+        log(f"  wallclock: {time.time() - t0:.1f}s")
+
+        stage_1_3_meta = {
+            "total": report.total,
+            "kept": report.kept,
+            "drops": dict(report.drops),
+        }
+        # Checkpoint: write rows + report.
+        log(f"  writing checkpoint -> {ckpt['stage_1_3_rows']}")
+        write_jsonl(ckpt["stage_1_3_rows"], kept)
+        write_report(ckpt["stage_1_3_report"], stage_1_3_meta)
+
+    # Stage 4a — MinHash dedup.
     stage4_drops: Counter = Counter()
-    if not args.skip_dedup and kept:
+    if have_stage_4a:
+        log(f"\n=== Resume: loading stage 4a checkpoint ===")
+        t0 = time.time()
+        kept = read_jsonl(ckpt["stage_4a_rows"])
+        log(f"  loaded {len(kept):,} rows in {time.time()-t0:.1f}s")
+        if ckpt["stage_4a_report"].exists():
+            stage4_drops.update(read_report(ckpt["stage_4a_report"]).get("drops", {}))
+    elif not args.skip_dedup and kept:
         log(f"\n=== Stage 4a: MinHash dedup (threshold={args.minhash_threshold}) ===")
         t0 = time.time()
         before = len(kept)
@@ -258,8 +340,15 @@ def main() -> None:
         stage4_drops["minhash_near_duplicate"] = n_dropped
         log(f"  {before:,} -> {len(kept):,} ({n_dropped:,} near-dup dropped, "
             f"{time.time() - t0:.1f}s)")
+        # Checkpoint stage 4a.
+        log(f"  writing checkpoint -> {ckpt['stage_4a_rows']}")
+        write_jsonl(ckpt["stage_4a_rows"], kept)
+        write_report(ckpt["stage_4a_report"], {"drops": dict(stage4_drops)})
 
-    # Stage 4 — diversity downsample.
+    # Stage 4b — diversity downsample. (No checkpoint between 4a and 4b — 4b is
+    # fast enough that re-running it from the 4a checkpoint is acceptable. The
+    # expensive parts of 4b are embed + cluster, both of which would need
+    # serializing the kmeans state to checkpoint mid-run.)
     if not args.skip_diversity and args.target_size is not None and len(kept) > args.target_size:
         log(f"\n=== Stage 4b: diversity downsample to {args.target_size:,} ===")
         t0 = time.time()
@@ -275,28 +364,35 @@ def main() -> None:
         stage4_drops["diversity_downsample"] = before - len(kept)
         log(f"  {before:,} -> {len(kept):,} ({time.time() - t0:.1f}s)")
 
-    # Write outputs.
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Final write.
     n_written = write_jsonl(out_path, kept)
     log(f"\nWrote {n_written:,} rows -> {out_path}")
 
     report_path = Path(args.report_out) if args.report_out else out_path.with_suffix(".report.json")
     full_report = {
         "args": {k: v for k, v in vars(args).items()},
-        "stage_1_3": {
-            "total": report.total,
-            "kept": report.kept,
-            "drops": dict(report.drops),
-        },
+        "stage_1_3": stage_1_3_meta,
         "stage_4": dict(stage4_drops),
         "final_kept": n_written,
         "structural_config": asdict(s_cfg),
         "lang_config": asdict(l_cfg),
         "artifact_config": asdict(a_cfg),
+        "resumed_from": (
+            "stage_4a" if have_stage_4a
+            else "stage_1_3" if have_stage_1_3
+            else "scratch"
+        ),
     }
     write_report(report_path, full_report)
     log(f"Wrote report -> {report_path}")
+
+    # Cleanup checkpoints on success unless the user asked to keep them.
+    if not args.keep_checkpoints:
+        for k in ("stage_1_3_rows", "stage_1_3_report", "stage_4a_rows", "stage_4a_report"):
+            try:
+                ckpt[k].unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

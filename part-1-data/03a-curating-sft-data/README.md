@@ -213,6 +213,30 @@ Outputs:
 - `italian-sft-curated.jsonl` — the curated rows.
 - `italian-sft-curated.report.json` — the drop-reason histogram and exact configs used.
 
+### Crash-resume
+
+A full curation run on 2.14M rows is long enough (~10–30 minutes wallclock) that a laptop reboot, a WSL crash, or an OOM kill mid-pipeline becomes a real concern. The pipeline writes **stage-level checkpoints** so a crash in stage 4 doesn't lose the work done in stages 1–3.
+
+What gets written, and when:
+
+| When | Files |
+|---|---|
+| After stage 1-3 (per-row filters) completes | `<out>.stage_1_3.jsonl` (kept rows) + `<out>.stage_1_3.report.json` (drop counts) |
+| After stage 4a (MinHash dedup) completes | `<out>.stage_4a.jsonl` + `<out>.stage_4a.report.json` |
+| After stage 4b + final write | `<out>` itself + `<out>.report.json` |
+
+On re-launch with the same `--out` path:
+
+- If `<out>.stage_4a.jsonl` exists → skip stages 1-3 AND 4a, load from the 4a checkpoint, run only 4b.
+- Else if `<out>.stage_1_3.jsonl` exists → skip stage 1-3, load from the 1-3 checkpoint, run 4a + 4b.
+- Else → fresh run.
+
+The `resumed_from` field in `<out>.report.json` records which path was taken (`scratch` / `stage_1_3` / `stage_4a`).
+
+Successful runs **delete the intermediate checkpoints** by default — they're large (potentially hundreds of MB), and the final output is what you want. Pass `--keep-checkpoints` to retain them (useful when iterating on stage 4b thresholds — you can re-run 4b from the 4a checkpoint without redoing 1-3 or 4a).
+
+Force a fresh run with `--no-resume`. Use this when you've changed stage 1-3 thresholds, the calque blocklist, or the langid model — the checkpoint reflects the OLD config and re-using it would silently skip your changes.
+
 ### Scaling across cores
 
 Stage 1-3 is the long pole — 2.14M rows × ~7 filters × langid is single-core CPU-bound by default and runs in ~15 minutes. Multiprocessing via `--workers N` brings it down to a few minutes. Each worker lazy-loads its own `lid.176.ftz` (one-time ~100ms cost); the filter functions themselves are pure, so parallelism is essentially free.
