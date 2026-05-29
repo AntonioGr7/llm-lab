@@ -22,6 +22,7 @@ By the end you will implement three of these variants from scratch (MHA, GQA, ML
 - Derive scaled dot-product attention and explain every term (including why √d_k).
 - Implement Multi-Head Attention, Grouped-Query Attention, and Multi-Head Latent Attention end-to-end, with shape-checked forward passes.
 - Use FlashAttention transparently through PyTorch's `scaled_dot_product_attention`.
+- Explain why QK-Norm stabilizes large-scale training, and apply it correctly (per-head, over $d_{\text{head}}$, before RoPE).
 - Compute KV-cache size for a given architecture and explain why MLA wins at long context.
 - Articulate when to reach for sliding-window or linear-attention hybrids (Qwen 3.5 style), and recognize the design pressures that motivate sparse-routing attention (DeepSeek DSA/CSA — covered in a later revision of this module).
 - Read a frontier-model paper's "attention" section and identify which design pressures their choices reflect.
@@ -72,7 +73,31 @@ That's the canonical implementation. Every variant below mutates exactly one of 
 
 **Why multiple heads matter.** Different heads end up specializing — some attend to syntactic neighbors, some to long-range coreferences, some to specific token types. Probing studies show this consistently. You won't outperform 4 heads at $d_{\text{model}}$=512 with 1 head at $d_{\text{head}}$=512; the parallel diversity is the point.
 
-## 3. The complexity wall
+## 3. QK-Norm — keeping the attention logits in range
+
+Section 1 explained the $\sqrt{d_k}$ scaling: without it, the dot product $QK^\top$ grows with $d_k$, softmax saturates, and gradients vanish. That fix assumes $Q$ and $K$ have roughly unit-variance entries. **During training, they don't stay that way.** The norms of the query and key projections drift upward as the model trains — there's nothing in the loss directly pinning them down — and the attention logits $q \cdot k$ grow with them. Past a certain scale the softmax saturates to near-one-hot, attention entropy collapses, the logits can overflow BF16's range, and training spikes or diverges. This is one of the most common large-scale-training instabilities, and $\sqrt{d_k}$ alone doesn't prevent it because it's a *constant* — it doesn't react to the projections growing.
+
+**QK-Norm** is the fix that's become standard since 2024: apply an RMSNorm to the query and key vectors, per head, **after the projection and before the dot product**.
+
+$$\hat{q} = \text{RMSNorm}(q)\,\gamma_q, \qquad \hat{k} = \text{RMSNorm}(k)\,\gamma_k, \qquad \text{scores} = \frac{\hat{q}\,\hat{k}^\top}{\sqrt{d_k}}$$
+
+Because RMSNorm fixes the root-mean-square of each $q$ and $k$ vector to 1 (times a learnable per-feature $\gamma$), the magnitude of the logits is now *bounded by construction* instead of free to drift. The learnable $\gamma$ keeps the expressivity — the model can still scale individual feature dimensions — but the overall scale is anchored. It turns the $\sqrt{d_k}$ heuristic into an actual guarantee that holds throughout training.
+
+**Three implementation details that matter:**
+
+1. **Per head, over $d_{\text{head}}$.** The norm is computed over the per-head dimension, and a *single* $\gamma$ of width $d_{\text{head}}$ is shared across all heads (one for queries, one for keys). It is **not** a norm over $d_{\text{model}}$. This is how Qwen3 does it.
+2. **Before RoPE.** Apply the norm to the raw projected $q$/$k$, then rotate. RoPE is a rotation and therefore norm-preserving, so norm-then-RoPE leaves the unit-scale guarantee intact while keeping the position information.
+3. **FP32 inside the norm.** Same reason as every other RMSNorm in the model: the squared mean can underflow in BF16. Promote to FP32, normalize, cast back — this is exactly the stability bug QK-Norm exists to prevent, so don't reintroduce it inside the fix.
+
+**Who uses it.** QK-Norm originates with Henry et al. (2020) and was scaled up in Dehghani et al.'s ViT-22B (2023), which needed it to train at all. It is now in **Qwen3**, **Gemma 2 / 3**, **OLMo 2**, and others — effectively part of the default modern recipe alongside RMSNorm, RoPE, and the bias-free convention. OLMo 2's ablations single it out as one of the cheap changes that meaningfully improved training stability.
+
+**Cost.** Two RMSNorm calls per attention layer, each over $d_{\text{head}}$. Parameter cost is $2 \cdot d_{\text{head}}$ scalars per layer — negligible (16 extra params per layer at $d_{\text{head}}=8$ in our smoke test). Compute cost is a rounding error next to the matmuls. This is a very high return-on-investment knob.
+
+**In our implementation** ([`attention.py`](attention.py)), every variant takes a `qk_norm: bool` flag. `MultiHeadAttention` and `GroupedQueryAttention` normalize $q$ and $k$ directly (GQA normalizes the keys *before* the K/V broadcast, so it's the stored keys that get normalized, not their replicated copies). For `MultiHeadLatentAttention` the choice is subtler: we normalize the **content** halves $q_c$, $k_c$ and leave the decoupled-RoPE halves $q_r$, $k_r$ alone — $k_r$ is a single per-token vector shared across all heads (§9's decoupled-RoPE trick), so head-wise QK-Norm doesn't apply to it cleanly, and RoPE already controls its scale. Note that DeepSeek-V2/V3 themselves do not use QK-Norm; normalizing the content halves is the natural way to graft it on if you want the stability benefit on an MLA model.
+
+In the full model ([model.py](../07-full-model/model.py)) `qk_norm` defaults to **on** — it's the modern default and the cost is trivial.
+
+## 4. The complexity wall
 
 Attention is $O(n^2)$ in sequence length. Two costs to track separately:
 
@@ -97,7 +122,7 @@ The next sections each pick at one of these pressure points:
 | Hybrid linear-attention | Compute cost (replace softmax in most layers) |
 | DSA / CSA | Compute cost (sparse routing) and KV cache (compression) |
 
-## 4. Grouped-Query Attention (MQA → GQA)
+## 5. Grouped-Query Attention (MQA → GQA)
 
 The easiest KV-cache win, and the one every modern decoder uses.
 
@@ -125,7 +150,7 @@ def gqa(x, W_q, W_kv, W_o, n_q_heads, n_kv_heads):
 
 In our implementation ([`attention.py`](attention.py)), `GroupedQueryAttention(n_heads=H, n_kv_heads=G)` is the canonical class. Setting $G = H$ recovers MHA; setting $G = 1$ recovers MQA.
 
-## 5. FlashAttention — same math, different I/O
+## 6. FlashAttention — same math, different I/O
 
 The Big Lie about attention is that it's compute-bound. It's not. **It's memory-bound.** The bottleneck on modern GPUs is high-bandwidth-memory (HBM) traffic — moving the $n \times n$ attention matrix in and out of HBM for the softmax. The matmul FLOPs are easy; the memory I/O is what's slow.
 
@@ -156,7 +181,7 @@ That single call is what every implementation in this course uses for the attent
 
 **When you'd write your own FlashAttention.** Rare. The reasons people do: custom masking patterns that SDPA doesn't support (block-sparse, document-boundary), exotic data types (FP8 with custom scaling), or research on alternatives. For pretraining, fine-tuning, and most inference, the bundled SDPA backend is the right call.
 
-## 6. Sliding Window Attention
+## 7. Sliding Window Attention
 
 The simplest sparsity pattern. Each token attends only to the previous $W$ tokens; entries past $W$ are masked out.
 
@@ -168,7 +193,7 @@ The simplest sparsity pattern. Each token attends only to the previous $W$ token
 
 **Tradeoff:** you give up *direct* long-range attention. For some tasks (long-range factual recall, in-context learning over long documents) this hurts. For most local-context tasks it doesn't.
 
-## 7. The KV cache wall — and why it forces compression
+## 8. The KV cache wall — and why it forces compression
 
 Quick math. For a model with $L$ layers, $H$ heads, $d_{\text{head}}$ per head, BF16 (2 bytes per number), at context length $n$, the KV cache size is:
 
@@ -187,7 +212,7 @@ Two ways out:
 
 MLA, next, is the most aggressive answer to (1).
 
-## 8. Multi-Head Latent Attention (MLA) — DeepSeek V2/V3
+## 9. Multi-Head Latent Attention (MLA) — DeepSeek V2/V3
 
 The biggest single architectural change in 2024 frontier models, and a real piece of design cleverness.
 
@@ -245,7 +270,7 @@ At inference time you cache $c_{KV}$ and $k_r$; the decompression and attention 
 
 **Training cost**: roughly the same as MHA. **Inference memory**: the order-of-magnitude smaller cache is the entire point.
 
-## 9. Hybrid attention — Qwen 3.5 and the linear-attention comeback
+## 10. Hybrid attention — Qwen 3.5 and the linear-attention comeback
 
 Two observations are now load-bearing:
 
@@ -266,13 +291,13 @@ Examples in 2025–2026:
 
 **What we don't implement.** Hybrid attention requires picking and implementing a specific linear-attention variant, and the choice space is still moving. We describe the design at the conceptual level here. If you build a hybrid model later, the canonical references to start with are [Mamba](https://arxiv.org/abs/2312.00752) (state-space), [DeltaNet](https://arxiv.org/abs/2406.06484) (linear-attention with delta-rule updates), and Jamba's architecture paper.
 
-## 10. Sparse and Compressed-Sparse Attention (DeepSeek V3.2 / V4) — *placeholder*
+## 11. Sparse and Compressed-Sparse Attention (DeepSeek V3.2 / V4) — *placeholder*
 
 > **TODO — coming back to this.** This section originally covered **DeepSeek Sparse Attention (DSA, V3.2)** and **Compressed Sparse Attention (CSA, V4)**, but the writeup wasn't at the level of clarity I want for this course, and several specifics were flagged as "approximate, verify" against my own notes. Rather than leave a half-confident explanation in the main path, I've removed it for now and will rewrite it from the V3.2 and V4 papers directly when I revisit this module.
 >
 > The one-line shape of the trajectory, kept here so the rest of the module reads coherently: **MLA → DSA → CSA** is the story of attention research engineering down the *remaining* cost — MLA shrinks the KV cache, DSA shrinks the attention compute via learned top-$k$ key selection, and CSA fuses both into a single sparse-over-compressed operator. If you need this material before I get back to it, start with the DeepSeek-V3.2 technical report.
 
-## 11. The decision table
+## 12. The decision table
 
 What to use, and when, in 2026:
 
@@ -282,26 +307,27 @@ What to use, and when, in 2026:
 | Building a research demo of DeepSeek-V3 architecture | **MLA + FlashAttention** | The defining feature of V3; we use it in [Module 11](../../part-3-pretraining/11-pretraining-in-practice/) |
 | Serving long-context inference on a small budget | **MLA**, possibly + KV quantization | Cache size dominates inference cost at long context |
 | Optimizing inference throughput at fixed quality | **Hybrid (3:1 linear:softmax)** | Most layers don't need softmax expressivity |
-| At the frontier, pushing context past 256k | **MLA + sparse top-$k$ routing** (DeepSeek V3.2 / V4 line) | Both cache and compute scale better than alternatives — see §10 placeholder; we'll cover this once the writeup is rebuilt |
+| At the frontier, pushing context past 256k | **MLA + sparse top-$k$ routing** (DeepSeek V3.2 / V4 line) | Both cache and compute scale better than alternatives — see §11 placeholder; we'll cover this once the writeup is rebuilt |
 | Doing research on novel attention | Start from SDPA, replace one term at a time | The math is stable; the cost structure is what you're moving |
 
-## 12. What we implement, what we describe
+## 13. What we implement, what we describe
 
 | Variant | Status in this course |
 |---|---|
 | Scaled dot-product attention | Implemented from scratch ([`attention.py`](attention.py)) — also via PyTorch SDPA |
 | Multi-Head Attention | Full implementation |
 | Grouped-Query Attention | Full implementation (parameterized; MHA = GQA(groups=H), MQA = GQA(groups=1)) |
+| **QK-Norm** | **Full implementation — `qk_norm` flag on all three variants; on by default in the full model** |
 | FlashAttention | Used transparently via PyTorch SDPA — no separate implementation needed |
 | Sliding-window attention | Described; trivial to enable via SDPA's `attn_mask` argument |
 | **Multi-Head Latent Attention** | **Full implementation, including decoupled RoPE** |
 | Hybrid attention (Qwen 3.5 style) | Described conceptually; implementation deferred (would require picking a linear-attention variant) |
-| DSA (DeepSeek V3.2) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §10) |
-| CSA (DeepSeek V4) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §10) |
+| DSA (DeepSeek V3.2) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §11) |
+| CSA (DeepSeek V4) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §11) |
 
 For the rest of the course (Module 11's pretraining run, Part 4's post-training), we use **Qwen3's GQA + SDPA** as the default attention — Module 11 builds a `Qwen3ForCausalLM` from scratch and Part 4 loads `Qwen/Qwen3-1.7B-Base` via `AutoModelForCausalLM`. MLA is implemented in this module as a from-scratch teaching exercise — we don't carry it forward into the pretraining run because the Qwen3 architecture (and its tokenizer, configs, and downstream-friendly HF integration) is what the rest of the course is built on. If you want to swap in MLA for the pretraining run, [model.py](../../part-3-pretraining/11-pretraining-in-practice/model.py) is the single file to edit — the framework around it is architecture-agnostic.
 
-## 13. What "knowing attention" means
+## 14. What "knowing attention" means
 
 By the end of this module you should be able to do four things on the back of an envelope:
 

@@ -20,6 +20,35 @@ from rope import apply_rotary_emb
 
 
 # ---------------------------------------------------------------------------
+# QK-Norm helper
+# ---------------------------------------------------------------------------
+# This is the same RMSNorm as Module 05's block.py, duplicated here so that
+# Module 04 stays standalone (it must not import forward from a later module).
+# The one difference in *usage*: here it normalizes over the per-head dimension
+# (d_head), not the residual width (d_model).
+
+class RMSNorm(nn.Module):
+    """Root-mean-square normalization over the last dimension.
+
+    For QK-Norm we instantiate this with `d_head`, so a single learnable
+    `gamma` of width `d_head` is shared across all heads and applied to every
+    head's query (or key) vector independently. The FP32 promotion matters in
+    BF16 training: the squared mean can underflow, producing NaN/Inf logits
+    that are painful to trace. This matches Llama/Qwen reference code.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.gamma = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_fp32 = x.float()
+        rrms = x_fp32.pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x_fp32 * rrms).type_as(x) * self.gamma
+
+
+# ---------------------------------------------------------------------------
 # Reference implementation — for understanding, not for production use.
 # ---------------------------------------------------------------------------
 
@@ -61,18 +90,32 @@ class MultiHeadAttention(nn.Module):
     d_model x d_model matrix.
 
     KV cache size per token: 2 * n_heads * d_head = 2 * d_model values.
+
+    `qk_norm` adds per-head RMSNorm to Q and K before the dot product
+    (Qwen3, Gemma 2/3, OLMo 2). It bounds the magnitude of the attention
+    logits, which prevents the logit-blowup / attention-entropy-collapse
+    instability that shows up at scale and in long-context / low-precision
+    training. Cost is two tiny `d_head`-wide norms; see the README.
     """
 
-    def __init__(self, d_model: int, n_heads: int, *, use_rope: bool = True):
+    def __init__(
+        self, d_model: int, n_heads: int, *, use_rope: bool = True, qk_norm: bool = False
+    ):
         super().__init__()
         assert d_model % n_heads == 0, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.use_rope = use_rope
+        self.qk_norm = qk_norm
 
         self.W_qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.W_o = nn.Linear(d_model, d_model, bias=False)
+
+        # Per-head QK-Norm: one gamma of width d_head, shared across heads.
+        if qk_norm:
+            self.q_norm = RMSNorm(self.d_head)
+            self.k_norm = RMSNorm(self.d_head)
 
     def forward(self, x: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, D = x.shape
@@ -84,6 +127,13 @@ class MultiHeadAttention(nn.Module):
         q = q.view(B, T, H, dh).transpose(1, 2)                # (B, H, T, dh)
         k = k.view(B, T, H, dh).transpose(1, 2)
         v = v.view(B, T, H, dh).transpose(1, 2)
+
+        # QK-Norm goes on the raw projected Q/K, before RoPE. RoPE is a rotation
+        # and therefore norm-preserving, so norm-then-RoPE keeps the unit-scale
+        # guarantee intact.
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.use_rope:
             assert freqs_cis is not None, "RoPE enabled but freqs_cis not provided"
@@ -109,6 +159,11 @@ class GroupedQueryAttention(nn.Module):
     Multi-Query Attention (MQA). Llama 2/3 use n_kv_heads = 8 for n_heads = 64.
 
     KV cache size per token: 2 * n_kv_heads * d_head. Ratio vs MHA: n_kv_heads / n_heads.
+
+    `qk_norm` adds per-head RMSNorm to Q and K (see `MultiHeadAttention`).
+    The K norm uses `n_kv_heads` heads' worth of a single `d_head`-wide gamma
+    and is applied *before* the K/V broadcast, so it normalizes the stored
+    keys, not their replicated copies.
     """
 
     def __init__(
@@ -118,6 +173,7 @@ class GroupedQueryAttention(nn.Module):
         n_kv_heads: int,
         *,
         use_rope: bool = True,
+        qk_norm: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
@@ -130,12 +186,18 @@ class GroupedQueryAttention(nn.Module):
         self.n_groups = n_heads // n_kv_heads  # query heads per shared KV head
         self.d_head = d_model // n_heads
         self.use_rope = use_rope
+        self.qk_norm = qk_norm
 
         # Q gets full n_heads * d_head; KV get n_kv_heads * d_head each.
         self.W_q = nn.Linear(d_model, n_heads * self.d_head, bias=False)
         self.W_k = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
         self.W_v = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
         self.W_o = nn.Linear(n_heads * self.d_head, d_model, bias=False)
+
+        # Per-head QK-Norm: one gamma of width d_head, shared across heads.
+        if qk_norm:
+            self.q_norm = RMSNorm(self.d_head)
+            self.k_norm = RMSNorm(self.d_head)
 
     def forward(self, x: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, T, D = x.shape
@@ -144,6 +206,11 @@ class GroupedQueryAttention(nn.Module):
         q = self.W_q(x).view(B, T, Hq,  dh).transpose(1, 2)    # (B, Hq,  T, dh)
         k = self.W_k(x).view(B, T, Hkv, dh).transpose(1, 2)    # (B, Hkv, T, dh)
         v = self.W_v(x).view(B, T, Hkv, dh).transpose(1, 2)    # (B, Hkv, T, dh)
+
+        # QK-Norm before RoPE and before the K broadcast (normalizes stored keys).
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if self.use_rope:
             assert freqs_cis is not None, "RoPE enabled but freqs_cis not provided"
@@ -187,6 +254,13 @@ class MultiHeadLatentAttention(nn.Module):
         d_q_latent: optional Q-path latent dimension. If set, queries are
             also computed through a low-rank bottleneck (DeepSeek-V3 does
             this; reduces parameter count). Defaults to None (direct projection).
+        qk_norm: if True, apply per-head RMSNorm to the *content* halves of Q
+            and K (`q_c`, `k_c`) before the dot product. The decoupled-RoPE
+            halves (`q_r`, `k_r`) are left unnormalized: `k_r` is a single
+            shared vector cached per token (not per-head), so head-wise QK-Norm
+            doesn't apply to it cleanly, and RoPE already controls its scale.
+            Note DeepSeek-V2/V3 themselves do *not* use QK-Norm; this is the
+            natural way to graft it onto MLA if you want the stability benefit.
     """
 
     def __init__(
@@ -197,6 +271,8 @@ class MultiHeadLatentAttention(nn.Module):
         d_rope: int,
         d_kv_latent: int,
         d_q_latent: Optional[int] = None,
+        *,
+        qk_norm: bool = False,
     ):
         super().__init__()
         assert d_rope % 2 == 0, "d_rope must be even (RoPE rotates pairs of features)"
@@ -206,6 +282,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.d_rope = d_rope
         self.d_kv_latent = d_kv_latent
         self.d_q_latent = d_q_latent
+        self.qk_norm = qk_norm
 
         # Q path. Either direct (d_model -> n_heads * (d_head + d_rope))
         # or through a latent (d_model -> d_q_latent -> n_heads * (d_head + d_rope)).
@@ -231,6 +308,11 @@ class MultiHeadLatentAttention(nn.Module):
         # Output projection.
         self.W_o = nn.Linear(n_heads * d_head, d_model, bias=False)
 
+        # Per-head QK-Norm on the content halves only (width d_head).
+        if qk_norm:
+            self.q_norm = RMSNorm(d_head)
+            self.k_norm = RMSNorm(d_head)
+
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         B, T, D = x.shape
         H, dh, dr = self.n_heads, self.d_head, self.d_rope
@@ -249,6 +331,11 @@ class MultiHeadLatentAttention(nn.Module):
         c_kv = self.W_kv_down(x)                                   # (B, T, d_kv_latent)  ← cached
         k_c = self.W_kc(c_kv).view(B, T, H, dh).transpose(1, 2)    # (B, H, T, dh)
         v   = self.W_v(c_kv).view(B, T, H, dh).transpose(1, 2)     # (B, H, T, dh)
+
+        # QK-Norm on the content halves only (the RoPE halves stay as-is — see __init__).
+        if self.qk_norm:
+            q_c = self.q_norm(q_c)
+            k_c = self.k_norm(k_c)
 
         # --- Shared RoPE K (also cached, but a single d_rope vector per token, not per-head) ---
         k_r = self.W_kr(x)                                         # (B, T, dr)            ← cached
@@ -293,12 +380,24 @@ if __name__ == "__main__":
     print(f"params: {sum(p.numel() for p in mha.parameters()):,}")
     print(f"KV cache per token (BF16): {2 * H * (D // H) * 2} bytes")
 
+    print("\n--- MultiHeadAttention (qk_norm=True) ---")
+    mha_qk = MultiHeadAttention(d_model=D, n_heads=H, use_rope=True, qk_norm=True)
+    out = mha_qk(x, freqs_cis)
+    print(f"output shape: {tuple(out.shape)}")
+    print(f"params: {sum(p.numel() for p in mha_qk.parameters()):,}  (+2 * d_head gammas)")
+
     print("\n--- GroupedQueryAttention (n_kv_heads=2) ---")
     gqa = GroupedQueryAttention(d_model=D, n_heads=H, n_kv_heads=2)
     out = gqa(x, freqs_cis)
     print(f"output shape: {tuple(out.shape)}")
     print(f"params: {sum(p.numel() for p in gqa.parameters()):,}")
     print(f"KV cache per token (BF16): {gqa.kv_cache_size_per_token()} bytes")
+
+    print("\n--- GroupedQueryAttention (n_kv_heads=2, qk_norm=True) ---")
+    gqa_qk = GroupedQueryAttention(d_model=D, n_heads=H, n_kv_heads=2, qk_norm=True)
+    out = gqa_qk(x, freqs_cis)
+    print(f"output shape: {tuple(out.shape)}")
+    print(f"params: {sum(p.numel() for p in gqa_qk.parameters()):,}  (+2 * d_head gammas)")
 
     print("\n--- MultiHeadLatentAttention ---")
     mla = MultiHeadLatentAttention(
@@ -309,3 +408,11 @@ if __name__ == "__main__":
     print(f"output shape: {tuple(out.shape)}")
     print(f"params: {sum(p.numel() for p in mla.parameters()):,}")
     print(f"KV cache per token (BF16): {mla.kv_cache_size_per_token()} bytes")
+
+    print("\n--- MultiHeadLatentAttention (qk_norm=True) ---")
+    mla_qk = MultiHeadLatentAttention(
+        d_model=D, n_heads=H, d_head=D // H, d_rope=8, d_kv_latent=16, qk_norm=True
+    )
+    out = mla_qk(x, freqs_cis_mla)
+    print(f"output shape: {tuple(out.shape)}")
+    print(f"params: {sum(p.numel() for p in mla_qk.parameters()):,}  (+2 * d_head gammas, content halves only)")

@@ -69,6 +69,7 @@ class ModelConfig:
     d_rope: int = 64             # MLA: per-head RoPE dim. Shared K_r at this width.
     d_kv_latent: int = 128       # MLA: cached latent dim.
     d_q_latent: Optional[int] = None  # MLA: optional query latent.
+    qk_norm: bool = True         # per-head RMSNorm on Q/K (Qwen3, Gemma 2/3, OLMo 2)
     rope_base: float = 10_000.0
 
     # FFN
@@ -94,16 +95,20 @@ class ModelConfig:
 def _make_attention(cfg: ModelConfig) -> nn.Module:
     """Instantiate the configured attention module."""
     if cfg.attention_type == "mha":
-        return MultiHeadAttention(d_model=cfg.d_model, n_heads=cfg.n_heads, use_rope=True)
+        return MultiHeadAttention(
+            d_model=cfg.d_model, n_heads=cfg.n_heads, use_rope=True, qk_norm=cfg.qk_norm,
+        )
     if cfg.attention_type == "gqa":
         return GroupedQueryAttention(
-            d_model=cfg.d_model, n_heads=cfg.n_heads, n_kv_heads=cfg.n_kv_heads, use_rope=True,
+            d_model=cfg.d_model, n_heads=cfg.n_heads, n_kv_heads=cfg.n_kv_heads,
+            use_rope=True, qk_norm=cfg.qk_norm,
         )
     if cfg.attention_type == "mla":
         d_head = cfg.d_head if cfg.d_head is not None else cfg.d_model // cfg.n_heads
         return MultiHeadLatentAttention(
             d_model=cfg.d_model, n_heads=cfg.n_heads, d_head=d_head,
             d_rope=cfg.d_rope, d_kv_latent=cfg.d_kv_latent, d_q_latent=cfg.d_q_latent,
+            qk_norm=cfg.qk_norm,
         )
     raise ValueError(f"unknown attention_type: {cfg.attention_type}")
 
