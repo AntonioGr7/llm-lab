@@ -215,19 +215,23 @@ Outputs:
 
 ### Crash-resume
 
-A full curation run on 2.14M rows is long enough (~10–30 minutes wallclock) that a laptop reboot, a WSL crash, or an OOM kill mid-pipeline becomes a real concern. The pipeline writes **stage-level checkpoints** so a crash in stage 4 doesn't lose the work done in stages 1–3.
+A full curation run on 2.14M rows is long enough (~10–30 minutes wallclock) that a laptop reboot, a WSL crash, or an OOM kill mid-pipeline becomes a real concern. The pipeline writes checkpoints so a crash doesn't throw away work — both **between** stages and, for the slow MinHash pass, **within** stage 4a.
 
 What gets written, and when:
 
 | When | Files |
 |---|---|
 | After stage 1-3 (per-row filters) completes | `<out>.stage_1_3.jsonl` (kept rows) + `<out>.stage_1_3.report.json` (drop counts) |
-| After stage 4a (MinHash dedup) completes | `<out>.stage_4a.jsonl` + `<out>.stage_4a.report.json` |
+| *During* stage 4a (every `--dedup-checkpoint-every` rows) | `<out>.stage_4a.jsonl` (kept rows, **streamed**) + `<out>.stage_4a.progress.json` (marker: `{processed, kept, dropped}`) |
+| After stage 4a (MinHash dedup) completes | `<out>.stage_4a.report.json` (and the progress marker is deleted) |
 | After stage 4b + final write | `<out>` itself + `<out>.report.json` |
+
+**Why stage 4a needs intra-stage checkpointing.** Stage 4a is a single-core sequential pass over the ~1.6M survivors of stages 1-3 — minutes of work, and the most likely place to be interrupted. The other stages either parallelize (1-3) or are short relative to it. So 4a streams its kept rows to disk as it goes and drops a small progress marker every `--dedup-checkpoint-every` input rows (default 50k); the rows file is `fsync`'d before each marker is written, and the marker is replaced atomically. A crash resumes from the **last marker**, not the start of the stage: the rows file is truncated back to the rows the marker promised (discarding any half-written tail), the LSH index is rebuilt by re-hashing those kept rows — LSH queries are order-independent, so this reproduces the crash-free result exactly — and iteration continues from where it stopped.
 
 On re-launch with the same `--out` path:
 
-- If `<out>.stage_4a.jsonl` exists → skip stages 1-3 AND 4a, load from the 4a checkpoint, run only 4b.
+- If `<out>.stage_4a.report.json` exists → stage 4a finished; skip stages 1-3 AND 4a, load from the 4a checkpoint, run only 4b.
+- Else if `<out>.stage_4a.progress.json` exists → stage 4a was interrupted mid-pass; load the 1-3 checkpoint as input and **resume 4a from the marker**.
 - Else if `<out>.stage_1_3.jsonl` exists → skip stage 1-3, load from the 1-3 checkpoint, run 4a + 4b.
 - Else → fresh run.
 

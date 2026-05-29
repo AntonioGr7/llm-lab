@@ -162,6 +162,7 @@ def _checkpoint_paths(out_path: Path) -> dict[str, Path]:
         "stage_1_3_report": Path(f"{stem}.stage_1_3.report.json"),
         "stage_4a_rows":    Path(f"{stem}.stage_4a.jsonl"),
         "stage_4a_report": Path(f"{stem}.stage_4a.report.json"),
+        "stage_4a_progress": Path(f"{stem}.stage_4a.progress.json"),
     }
 
 
@@ -207,6 +208,10 @@ def main() -> None:
     f4.add_argument("--minhash-threshold", type=float, default=0.85,
                     help="Jaccard threshold above which prompts are near-duplicates")
     f4.add_argument("--skip-dedup", action="store_true")
+    f4.add_argument("--dedup-checkpoint-every", type=int, default=50_000,
+                    help="Stream the stage-4a checkpoint + progress marker every N "
+                         "input rows (default: %(default)s). A crash mid-dedup resumes "
+                         "from the last marker. Smaller = more durable, more fsyncs.")
     f4.add_argument("--target-size", type=int, default=None,
                     help="If set, diversity-downsample to this many rows after dedup")
     f4.add_argument("--diversity-clusters", type=int, default=None,
@@ -265,7 +270,17 @@ def main() -> None:
 
     # Pre-flight: detect existing checkpoints (unless --no-resume).
     have_stage_1_3 = (not args.no_resume) and ckpt["stage_1_3_rows"].exists()
-    have_stage_4a  = (not args.no_resume) and ckpt["stage_4a_rows"].exists()
+    # Stage 4a now *streams* its rows file, so "rows file exists" no longer means
+    # "4a finished" — a crash before the first marker leaves a partial rows file.
+    # The report is written only after a clean completion, so it's the reliable
+    # done-signal; the progress marker (deleted on success) signals partial work.
+    stage_4a_partial = (not args.no_resume) and ckpt["stage_4a_progress"].exists()
+    have_stage_4a = (
+        (not args.no_resume)
+        and ckpt["stage_4a_report"].exists()
+        and ckpt["stage_4a_rows"].exists()
+        and not stage_4a_partial
+    )
 
     # Stage 1-3 — run or load from checkpoint.
     stage_1_3_meta: dict = {}
@@ -331,19 +346,30 @@ def main() -> None:
         if ckpt["stage_4a_report"].exists():
             stage4_drops.update(read_report(ckpt["stage_4a_report"]).get("drops", {}))
     elif not args.skip_dedup and kept:
-        log(f"\n=== Stage 4a: MinHash dedup (threshold={args.minhash_threshold}) ===")
+        if stage_4a_partial:
+            log(f"\n=== Resume: stage 4a partial checkpoint found, continuing dedup ===")
+            log(f"  -> {ckpt['stage_4a_rows']} (progress: {ckpt['stage_4a_progress']})")
+        else:
+            log(f"\n=== Stage 4a: MinHash dedup (threshold={args.minhash_threshold}) ===")
         t0 = time.time()
         before = len(kept)
+        # minhash_dedup streams kept rows to the stage_4a checkpoint and writes a
+        # progress marker every --dedup-checkpoint-every rows, so a crash mid-stage
+        # resumes from the last marker instead of restarting the whole pass.
         kept, n_dropped = minhash_dedup(
             kept, threshold=args.minhash_threshold, progress=not args.quiet,
+            checkpoint_path=ckpt["stage_4a_rows"],
+            state_path=ckpt["stage_4a_progress"],
+            checkpoint_every=args.dedup_checkpoint_every,
         )
         stage4_drops["minhash_near_duplicate"] = n_dropped
         log(f"  {before:,} -> {len(kept):,} ({n_dropped:,} near-dup dropped, "
             f"{time.time() - t0:.1f}s)")
-        # Checkpoint stage 4a.
-        log(f"  writing checkpoint -> {ckpt['stage_4a_rows']}")
-        write_jsonl(ckpt["stage_4a_rows"], kept)
+        # Stage 4a is complete: the rows file is already on disk (streamed). Write
+        # the report and drop the progress marker so this counts as a *completed*
+        # checkpoint on any future resume.
         write_report(ckpt["stage_4a_report"], {"drops": dict(stage4_drops)})
+        ckpt["stage_4a_progress"].unlink(missing_ok=True)
 
     # Stage 4b — diversity downsample. (No checkpoint between 4a and 4b — 4b is
     # fast enough that re-running it from the 4a checkpoint is acceptable. The
@@ -388,7 +414,8 @@ def main() -> None:
 
     # Cleanup checkpoints on success unless the user asked to keep them.
     if not args.keep_checkpoints:
-        for k in ("stage_1_3_rows", "stage_1_3_report", "stage_4a_rows", "stage_4a_report"):
+        for k in ("stage_1_3_rows", "stage_1_3_report", "stage_4a_rows",
+                  "stage_4a_report", "stage_4a_progress"):
             try:
                 ckpt[k].unlink(missing_ok=True)
             except Exception:

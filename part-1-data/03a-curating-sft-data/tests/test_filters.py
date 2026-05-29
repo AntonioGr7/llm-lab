@@ -299,6 +299,55 @@ def t_minhash():
     assert len(kept) == 3
 
 
+@check("minhash_dedup: resume after mid-stage crash == crash-free run")
+def t_minhash_resume():
+    try:
+        from filters import minhash_dedup
+        import datasketch  # noqa: F401
+    except ImportError:
+        print("       SKIP (datasketch not installed)")
+        return
+    import json
+    import tempfile
+
+    # Dataset with near-dups scattered throughout so dedup decisions depend on
+    # the LSH state built from earlier rows — exactly what resume must reproduce.
+    rows = []
+    for i in range(300):
+        rows.append(_row(f"Spiega il concetto numero {i} con un esempio pratico e chiaro.",
+                         f"Ecco una spiegazione completa del concetto {i} con esempi utili."))
+        if i % 5 == 0:
+            rows.append(_row(f"Spiega il concetto numero {i} con un esempio pratico e chiaro!",
+                             "dup"))  # near-dup of the row above
+
+    ref_kept, ref_drop = minhash_dedup(rows, threshold=0.85)
+
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        cp, sp = d / "s4a.jsonl", d / "s4a.progress.json"
+
+        # Streamed run with frequent markers must match the crash-free reference.
+        k1, dr1 = minhash_dedup(rows, threshold=0.85, checkpoint_path=cp,
+                                state_path=sp, checkpoint_every=30)
+        assert k1 == ref_kept and dr1 == ref_drop, "streamed run diverged from reference"
+
+        # Simulate a mid-stage crash at processed=150: rewrite the marker to that
+        # point and append a half-written line to the rows file (truncate must
+        # discard it), then resume against the full dataset.
+        kept_150, _ = minhash_dedup(rows[:150], threshold=0.85)
+        sp.write_text(json.dumps(
+            {"processed": 150, "kept": len(kept_150), "dropped": 150 - len(kept_150)}))
+        with cp.open("ab") as f:
+            f.write(b'{"messages": [partial-broken-tail')
+
+        k2, dr2 = minhash_dedup(rows, threshold=0.85, checkpoint_path=cp,
+                                state_path=sp, checkpoint_every=30)
+        assert k2 == ref_kept, f"resume kept diverged: {len(k2)} vs {len(ref_kept)}"
+        assert dr2 == ref_drop, f"resume dropped diverged: {dr2} vs {ref_drop}"
+        on_disk = [json.loads(l) for l in cp.read_text().splitlines()]
+        assert on_disk == ref_kept, "on-disk checkpoint != returned rows"
+
+
 # ----------------------------------------------------------------------
 # Orchestrator — short-circuit semantics + drop-reason counting
 # ----------------------------------------------------------------------

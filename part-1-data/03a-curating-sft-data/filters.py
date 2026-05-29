@@ -22,6 +22,8 @@ dataset actually contains.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -615,6 +617,34 @@ def run_per_row_filters(
 # ----------------------------------------------------------------------
 
 
+def _load_and_truncate_jsonl(path: Path, n_lines: int) -> list[Row]:
+    """Read the first ``n_lines`` JSONL rows from ``path`` and truncate the file
+    to exactly those lines.
+
+    Used on resume: the progress marker promises ``n_lines`` durable kept rows,
+    but a crash may have left extra (possibly half-written) lines appended after
+    the last marker. We drop everything past ``n_lines`` so the on-disk file and
+    the in-memory state agree before we continue.
+    """
+    rows: list[Row] = []
+    with path.open("rb+") as f:
+        offset = 0
+        count = 0
+        for raw in f:
+            if count >= n_lines:
+                break
+            offset += len(raw)
+            try:
+                rows.append(json.loads(raw))
+            except json.JSONDecodeError:
+                pass
+            count += 1
+        f.truncate(offset)
+        f.flush()
+        os.fsync(f.fileno())
+    return rows
+
+
 def minhash_dedup(
     rows: list[Row],
     threshold: float = 0.85,
@@ -622,6 +652,9 @@ def minhash_dedup(
     shingle_size: int = 5,
     progress: bool = False,
     desc: str = "minhash dedup",
+    checkpoint_path: Optional[Path] = None,
+    state_path: Optional[Path] = None,
+    checkpoint_every: int = 50_000,
 ) -> tuple[list[Row], int]:
     """Drop rows whose USER prompt is a near-duplicate of an earlier row's user prompt.
 
@@ -631,49 +664,138 @@ def minhash_dedup(
     Sequential by design — LSH insert order matters for which of N near-dups
     is the one kept. ``progress=True`` shows a tqdm bar with running kept /
     dropped counts.
+
+    **Crash-resume.** When ``checkpoint_path`` and ``state_path`` are both given,
+    kept rows are streamed to ``checkpoint_path`` as they're found, and every
+    ``checkpoint_every`` input rows a tiny ``state_path`` JSON marker is written
+    (``{processed, kept, dropped}``) after the rows file is fsync'd. If the
+    process dies mid-stage (WSL drop, OOM, reboot), calling again with the same
+    paths resumes from the last marker instead of restarting the whole pass:
+
+      1. the rows file is truncated back to the ``kept`` lines the marker
+         promised (discarding any partial tail), then reloaded;
+      2. the LSH index is rebuilt by re-MinHashing those kept rows — LSH queries
+         are order-independent given the same inserted set, so the dedup
+         decisions for the remaining input are identical to a crash-free run;
+      3. iteration continues from input row ``processed``.
+
+    The caller owns lifecycle: it deletes ``state_path`` once this returns
+    cleanly (the rows file then stands as the completed stage checkpoint).
     """
     try:
         from datasketch import MinHash, MinHashLSH  # type: ignore
     except ImportError as e:
         raise RuntimeError("datasketch is required for minhash_dedup (pip install datasketch)") from e
 
-    def _shingles(text: str, k: int) -> set[str]:
+    def _minhash(text: str):
+        """MinHash of ``text``'s shingles, or None if it has no shingles."""
         text = re.sub(r"\s+", " ", text.lower())
-        if len(text) <= k:
-            return {text}
-        return {text[i : i + k] for i in range(len(text) - k + 1)}
+        if not text:
+            return None
+        if len(text) <= shingle_size:
+            shingles = {text}
+        else:
+            shingles = {text[i : i + shingle_size] for i in range(len(text) - shingle_size + 1)}
+        if not shingles:
+            return None
+        m = MinHash(num_perm=num_perm)
+        for s in shingles:
+            m.update(s.encode("utf-8"))
+        return m
 
-    iterator: Iterable = enumerate(rows)
+    resumable = checkpoint_path is not None and state_path is not None
+
+    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+    kept: list[Row] = []
+    dropped = 0
+    start_index = 0
+    fh = None  # binary append handle for the streamed checkpoint
+
+    def _write_state(processed: int) -> None:
+        """Atomically persist the progress marker after fsync'ing the rows file."""
+        fh.flush()
+        os.fsync(fh.fileno())
+        tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as sf:
+            json.dump({"processed": processed, "kept": len(kept), "dropped": dropped}, sf)
+            sf.flush()
+            os.fsync(sf.fileno())
+        os.replace(tmp, state_path)
+
+    if resumable and state_path.exists() and checkpoint_path.exists():
+        # --- Resume path ---
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        start_index = int(state.get("processed", 0))
+        dropped = int(state.get("dropped", 0))
+        kept_count = int(state.get("kept", 0))
+        if progress:
+            print(
+                f"  [dedup] resume: {start_index:,}/{len(rows):,} input rows already processed "
+                f"({kept_count:,} kept, {dropped:,} dropped); rebuilding LSH index",
+                flush=True,
+            )
+        kept = _load_and_truncate_jsonl(checkpoint_path, kept_count)
+        rebuild_iter: Iterable = enumerate(kept)
+        if progress:
+            try:
+                from tqdm import tqdm  # type: ignore
+
+                rebuild_iter = tqdm(rebuild_iter, total=len(kept), desc="dedup rebuild", unit="row")
+            except ImportError:
+                pass
+        for j, row in rebuild_iter:
+            m = _minhash(user_text(row))
+            if m is not None:
+                lsh.insert(f"k_{j}", m)
+        fh = checkpoint_path.open("ab")
+    elif resumable:
+        fh = checkpoint_path.open("wb")
+
     pbar = None
     if progress:
         try:
             from tqdm import tqdm  # type: ignore
 
-            pbar = tqdm(total=len(rows), desc=desc, unit="row")
+            pbar = tqdm(total=len(rows), initial=start_index, desc=desc, unit="row")
         except ImportError:
             pass
 
-    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
-    kept: list[Row] = []
-    dropped = 0
-    for i, row in iterator:
-        shingles = _shingles(user_text(row), shingle_size)
-        if not shingles:
-            kept.append(row)
-        else:
-            m = MinHash(num_perm=num_perm)
-            for s in shingles:
-                m.update(s.encode("utf-8"))
-            key = f"row_{i}"
-            if lsh.query(m):
+    try:
+        for i in range(start_index, len(rows)):
+            row = rows[i]
+            m = _minhash(user_text(row))
+            keep = False
+            if m is None:
+                keep = True
+            elif lsh.query(m):
                 dropped += 1
             else:
-                lsh.insert(key, m)
+                lsh.insert(f"row_{i}", m)
+                keep = True
+
+            if keep:
                 kept.append(row)
-        if pbar is not None:
-            pbar.update(1)
-            if (i + 1) % 1000 == 0:
-                pbar.set_postfix(kept=len(kept), dropped=dropped)
+                if fh is not None:
+                    fh.write((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
+
+            if resumable and (i + 1) % checkpoint_every == 0:
+                _write_state(i + 1)
+
+            if pbar is not None:
+                pbar.update(1)
+                if (i + 1) % 1000 == 0:
+                    pbar.set_postfix(kept=len(kept), dropped=dropped)
+
+        if resumable:
+            # Final marker so a resume after a clean run is a no-op rather than
+            # a full re-pass (the caller will normally delete it on success).
+            _write_state(len(rows))
+    finally:
+        if fh is not None:
+            fh.flush()
+            os.fsync(fh.fileno())
+            fh.close()
+
     if pbar is not None:
         pbar.set_postfix(kept=len(kept), dropped=dropped)
         pbar.close()
