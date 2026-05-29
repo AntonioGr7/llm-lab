@@ -8,7 +8,7 @@ Attention is the operation. The transformer block is glue around it.
 
 Every architectural innovation in language models since 2017 — multi-query, grouped-query, FlashAttention, sliding-window, linear-attention hybrids, Multi-head Latent Attention, sparse routing — has been driven by *one* tension: keeping the expressive power of softmax attention while reducing its $O(n^2)$ cost, either in compute, in memory, in inference-time KV cache, or in all three at once.
 
-This module walks the full arrow from Vaswani 2017's scaled dot-product attention to DeepSeek V3.2's Sparse Attention and V4's Compressed Sparse Attention. At every step we ask the same questions:
+This module walks the full arrow from Vaswani 2017's scaled dot-product attention up through Multi-Head Latent Attention and linear-attention hybrids, with a placeholder pointing forward to DeepSeek's sparse-attention line (V3.2 / V4) that we'll fill in later. At every step we ask the same questions:
 
 1. **What does it compute?** The math.
 2. **What does it cost?** Compute, memory, KV cache, network for distributed inference.
@@ -23,7 +23,7 @@ By the end you will implement three of these variants from scratch (MHA, GQA, ML
 - Implement Multi-Head Attention, Grouped-Query Attention, and Multi-Head Latent Attention end-to-end, with shape-checked forward passes.
 - Use FlashAttention transparently through PyTorch's `scaled_dot_product_attention`.
 - Compute KV-cache size for a given architecture and explain why MLA wins at long context.
-- Articulate when to reach for sliding-window, linear-attention hybrids (Qwen 3.5 style), and sparse-routing attention (DeepSeek DSA/CSA).
+- Articulate when to reach for sliding-window or linear-attention hybrids (Qwen 3.5 style), and recognize the design pressures that motivate sparse-routing attention (DeepSeek DSA/CSA — covered in a later revision of this module).
 - Read a frontier-model paper's "attention" section and identify which design pressures their choices reflect.
 
 ## 1. Scaled dot-product attention
@@ -266,56 +266,13 @@ Examples in 2025–2026:
 
 **What we don't implement.** Hybrid attention requires picking and implementing a specific linear-attention variant, and the choice space is still moving. We describe the design at the conceptual level here. If you build a hybrid model later, the canonical references to start with are [Mamba](https://arxiv.org/abs/2312.00752) (state-space), [DeltaNet](https://arxiv.org/abs/2406.06484) (linear-attention with delta-rule updates), and Jamba's architecture paper.
 
-## 10. DeepSeek Sparse Attention (DSA) — V3.2
+## 10. Sparse and Compressed-Sparse Attention (DeepSeek V3.2 / V4) — *placeholder*
 
-> **Note**: my recall here is good at the conceptual level but I'd want to double-check the specific hyperparameters against the V3.2 paper. Treat the high-level mechanism as reliable; treat the exact dimensions and training schedule as "approximate, verify."
+> **TODO — coming back to this.** This section originally covered **DeepSeek Sparse Attention (DSA, V3.2)** and **Compressed Sparse Attention (CSA, V4)**, but the writeup wasn't at the level of clarity I want for this course, and several specifics were flagged as "approximate, verify" against my own notes. Rather than leave a half-confident explanation in the main path, I've removed it for now and will rewrite it from the V3.2 and V4 papers directly when I revisit this module.
+>
+> The one-line shape of the trajectory, kept here so the rest of the module reads coherently: **MLA → DSA → CSA** is the story of attention research engineering down the *remaining* cost — MLA shrinks the KV cache, DSA shrinks the attention compute via learned top-$k$ key selection, and CSA fuses both into a single sparse-over-compressed operator. If you need this material before I get back to it, start with the DeepSeek-V3.2 technical report.
 
-The next pressure point after MLA: **even with MLA's compression, every query still attends to every key.** Compute is still $O(n \cdot k_{\text{seq}})$ at decode (where $k_{\text{seq}}$ is the context length), and prefill is still $O(n^2)$.
-
-**DSA's idea.** Don't attend to every key. Learn a lightweight *indexer* that, for each query, scores which keys are worth attending to and selects the top-$k$.
-
-The architecture:
-
-1. **Lightning indexer** — a small auxiliary scoring head, much cheaper than full attention, that produces a score for each (query, key) pair. Specifically: a low-rank score $s_{ij} = u_i^\top v_j$ where $u, v$ are projections cheaper than full attention.
-2. **Top-k selection** — for each query, keep only the top-$k$ scored keys ($k \ll n$). The attention is computed only over those $k$ keys.
-3. **End-to-end training** — the indexer is trained jointly with the model, typically with a distillation loss against the full-attention version so the selection learns to keep the keys that *would* have gotten attention weight.
-
-**What it costs.** Prefill compute drops from $O(n^2)$ to $O(n \cdot k)$ where $k$ is the selection size (e.g. 256–2048 depending on context length). KV cache size is unchanged from MLA (MLA + DSA stack), but the *attention compute* is now sublinear in some configurations.
-
-**The not-quite-free part.** Top-$k$ selection breaks the dense matrix-multiply primitive that GPUs love. DSA needs custom kernels to be fast in practice — the gather operations are unfriendly to TensorCore-style fused matmuls. This is why open implementations of sparse attention have been slow to ship; the kernels are the work.
-
-**Used by:** DeepSeek-V3.2 (production-shipped, late 2025). Mechanism appears in derivative papers since.
-
-**Why this isn't the same as "just use a longer context with linear attention".** Linear attention's $O(n)$ comes from approximating softmax with a kernel; you lose the sharp peakedness that lets attention pick out one specific match in a long context. DSA keeps softmax (over the selected $k$), so you keep the picking-power, you just don't pay for all the keys you'd have ignored anyway.
-
-## 11. Compressed Sparse Attention (CSA) — DeepSeek V4
-
-> **Honest caveat**: My training data is light on V4-specific details. The high-level framing here ("combine MLA compression with DSA sparsity") is my best reconstruction; the specific architectural changes vs V3.2 are at the edge of what I can verify. If you can share the V4 paper or model card, I'll refine this section against canonical text.
-
-The conceptual direction is clear even if the specifics aren't: V4 fuses the **compression** lesson from MLA with the **sparsity** lesson from DSA into a single operator.
-
-The design pressures motivating it:
-
-- MLA shrunk the cache; the attention compute is still proportional to context length.
-- DSA shrunk the compute; the cache is still set by MLA.
-- Combine them and you have *small cache* + *sublinear compute* + *full-softmax expressivity on the kept keys*.
-
-The mechanism (high-confidence parts):
-
-- KV is still compressed into a latent (MLA-style).
-- A lightning-indexer-style routing selects the top-$k$ keys per query.
-- The selected keys are decompressed from the latent on demand, attention runs over them.
-
-The mechanism (less-confident parts — flagging for source-based refinement):
-
-- Whether V4 changes the indexer architecture (e.g. multiple routing heads).
-- Whether the selection is per-head or per-layer.
-- Specific dimensions and training-recipe differences from V3.2.
-- Whether there's an additional "compression-aware" routing signal.
-
-**What's robust regardless of specifics.** The trajectory MLA → DSA → CSA is a clean illustration of how frontier attention research moves: each generation identifies the *remaining* cost (cache, then compute, then both jointly) and engineers it down without giving up the mathematical core. If you understand MLA and DSA conceptually, the V4 paper will read as engineering deltas, not new fundamentals.
-
-## 12. The decision table
+## 11. The decision table
 
 What to use, and when, in 2026:
 
@@ -325,10 +282,10 @@ What to use, and when, in 2026:
 | Building a research demo of DeepSeek-V3 architecture | **MLA + FlashAttention** | The defining feature of V3; we use it in [Module 11](../../part-3-pretraining/11-pretraining-in-practice/) |
 | Serving long-context inference on a small budget | **MLA**, possibly + KV quantization | Cache size dominates inference cost at long context |
 | Optimizing inference throughput at fixed quality | **Hybrid (3:1 linear:softmax)** | Most layers don't need softmax expressivity |
-| At the frontier, pushing context past 256k | **MLA + DSA**, or CSA when V4-style kernels become open | Both cache and compute scale better than alternatives |
+| At the frontier, pushing context past 256k | **MLA + sparse top-$k$ routing** (DeepSeek V3.2 / V4 line) | Both cache and compute scale better than alternatives — see §10 placeholder; we'll cover this once the writeup is rebuilt |
 | Doing research on novel attention | Start from SDPA, replace one term at a time | The math is stable; the cost structure is what you're moving |
 
-## 13. What we implement, what we describe
+## 12. What we implement, what we describe
 
 | Variant | Status in this course |
 |---|---|
@@ -339,12 +296,12 @@ What to use, and when, in 2026:
 | Sliding-window attention | Described; trivial to enable via SDPA's `attn_mask` argument |
 | **Multi-Head Latent Attention** | **Full implementation, including decoupled RoPE** |
 | Hybrid attention (Qwen 3.5 style) | Described conceptually; implementation deferred (would require picking a linear-attention variant) |
-| DSA (DeepSeek V3.2) | Described; implementation deferred (custom kernels required for speed) |
-| CSA (DeepSeek V4) | Described conceptually; specifics to be refined against canonical sources |
+| DSA (DeepSeek V3.2) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §10) |
+| CSA (DeepSeek V4) | Placeholder only — writeup pulled for a future rewrite from canonical sources (see §10) |
 
-For the rest of the course (Module 11's pretraining run, Part 4's post-training), we use **MLA + SDPA** as the default attention. That's the most aggressive choice that's still entirely standard PyTorch and trains in reasonable time on an A100.
+For the rest of the course (Module 11's pretraining run, Part 4's post-training), we use **Qwen3's GQA + SDPA** as the default attention — Module 11 builds a `Qwen3ForCausalLM` from scratch and Part 4 loads `Qwen/Qwen3-1.7B-Base` via `AutoModelForCausalLM`. MLA is implemented in this module as a from-scratch teaching exercise — we don't carry it forward into the pretraining run because the Qwen3 architecture (and its tokenizer, configs, and downstream-friendly HF integration) is what the rest of the course is built on. If you want to swap in MLA for the pretraining run, [model.py](../../part-3-pretraining/11-pretraining-in-practice/model.py) is the single file to edit — the framework around it is architecture-agnostic.
 
-## 14. What "knowing attention" means
+## 13. What "knowing attention" means
 
 By the end of this module you should be able to do four things on the back of an envelope:
 
