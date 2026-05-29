@@ -46,6 +46,20 @@ from typing import Iterable, Optional, Protocol
 from filters import Row, assistant_text, normalize_row, user_text
 
 
+class BackendUnavailable(RuntimeError):
+    """The judge endpoint was unreachable after all retries.
+
+    Raised (not swallowed) so the orchestrator can tell *backend is down* apart
+    from *model returned junk*. A row that triggers this is left unscored — it is
+    never written to the sidecar, so it is re-scored on the next run. Consecutive
+    occurrences trip the circuit breaker in ``score_rows_resumable`` and abort the
+    run, which is what you want for a local server that has OOM'd and won't recover.
+
+    Contrast with a "malformed: ..." score: the server WAS reachable but returned
+    un-parseable output — a genuine, permanent low-quality drop.
+    """
+
+
 SYSTEM_PROMPT = """Sei un revisore esperto di dataset per il fine-tuning di modelli linguistici italiani.
 
 Riceverai una coppia (richiesta utente, risposta assistente). Il tuo compito è valutare la qualità della coppia su 4 assi, ciascuno con un punteggio intero da 0 a 5:
@@ -291,7 +305,10 @@ class OpenAICompatibleJudge:
             except (ValueError, KeyError, json.JSONDecodeError) as e:
                 # Malformed response — conservative drop, don't retry (waste).
                 return JudgeScore(0, 0, 0, 0, rationale=f"malformed: {str(e)[:80]}")
-        return JudgeScore(0, 0, 0, 0, rationale=f"http_error: {str(last_err)[:80]}")
+        # Endpoint unreachable after all retries. Raise so the orchestrator can
+        # leave the row unscored (recovered on resume) and count it toward the
+        # circuit breaker — rather than silently recording a permanent 0.
+        raise BackendUnavailable(str(last_err)[:160])
 
 
 # ----------------------------------------------------------------------
@@ -321,6 +338,7 @@ def score_rows_resumable(
     concurrent: int = 4,
     show_progress: bool = True,
     flush_every: int = 50,
+    fail_fast_after: int = 20,
 ) -> list[Optional[JudgeScore]]:
     """Score rows with bounded concurrency and incremental disk writes.
 
@@ -330,15 +348,29 @@ def score_rows_resumable(
     where you left off.
 
     Returns a list of length len(rows), indexed in input order. Entries for
-    rows whose scoring failed twice (after retries) will be ``None``.
+    rows that were not scored (failed, or skipped after the breaker tripped)
+    are ``None`` and will be re-scored on the next run.
 
     Threading is used (not multiprocessing) because the judge is I/O-bound
     on HTTP requests to llama.cpp. The server's own ``--parallel N`` slot
     count is the real concurrency knob — set ``concurrent`` to match it.
+
+    Circuit breaker: ``fail_fast_after`` consecutive ``BackendUnavailable``
+    errors abort the run by raising ``BackendUnavailable``. A transient blip
+    (e.g. a hosted API hiccup) is absorbed — one success resets the counter — but
+    a backend that is genuinely gone (e.g. a local llama.cpp that OOM'd) trips it
+    within seconds instead of grinding through every remaining row. All scores
+    completed before the trip are already flushed to ``scores_path``, so you fix
+    the backend and re-run to resume. Set ``fail_fast_after=0`` to disable (grind
+    through, leaving failed rows for the next run — sensible for a hosted API you
+    expect to recover on its own).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Event
 
-    # Load existing scores (resume).
+    # Load existing scores (resume). Only successfully-scored rows are ever
+    # written here — backend-down rows raise and are left unwritten — so every
+    # record is a real score, and anything missing simply gets re-scored.
     existing: dict[int, JudgeScore] = {}
     if scores_path.exists():
         with scores_path.open("r", encoding="utf-8") as f:
@@ -360,6 +392,9 @@ def score_rows_resumable(
     results: list[Optional[JudgeScore]] = [existing.get(i) for i in range(len(rows))]
     todo = [i for i in range(len(rows)) if results[i] is None]
 
+    if existing and show_progress:
+        print(f"  resume: {len(existing):,} rows already scored; re-scoring {len(todo):,} unscored")
+
     if not todo:
         return results
 
@@ -377,8 +412,15 @@ def score_rows_resumable(
             pass
 
     pending_writes = 0
+    consecutive_down = 0   # consecutive BackendUnavailable; resets on any success
+    aborted = Event()      # set when the breaker trips; makes queued rows no-op fast
+    last_down_err = ""
 
     def _score_one(idx: int) -> tuple[int, JudgeScore]:
+        # Once the breaker has tripped, don't bother hitting a dead backend for
+        # the rows still queued — fail instantly so the pool drains in moments.
+        if aborted.is_set():
+            raise BackendUnavailable("circuit breaker tripped")
         return idx, judge(rows[idx])
 
     try:
@@ -393,6 +435,19 @@ def score_rows_resumable(
                     if pending_writes >= flush_every:
                         out_f.flush()
                         pending_writes = 0
+                    consecutive_down = 0
+                except BackendUnavailable as e:
+                    # Endpoint unreachable. Leave results[idx] = None (re-scored
+                    # next run) and count toward the breaker.
+                    consecutive_down += 1
+                    last_down_err = str(e)
+                    if fail_fast_after and consecutive_down >= fail_fast_after and not aborted.is_set():
+                        aborted.set()
+                        if pbar is not None:
+                            pbar.write(
+                                f"  backend unreachable for {consecutive_down} rows in a row "
+                                f"-> aborting run (scored rows are saved; re-run to resume)"
+                            )
                 except Exception as e:
                     # Judge raised something we didn't catch internally; leave
                     # results[idx] as None, log via tqdm if available.
@@ -406,6 +461,14 @@ def score_rows_resumable(
         out_f.close()
         if pbar is not None:
             pbar.close()
+
+    if aborted.is_set():
+        n_done = sum(1 for s in results if s is not None)
+        raise BackendUnavailable(
+            f"aborted after {fail_fast_after} consecutive backend failures "
+            f"(last error: {last_down_err}). {n_done:,}/{len(rows):,} rows scored and "
+            f"saved to {scores_path}; re-run the same command to resume."
+        )
 
     return results
 
@@ -522,6 +585,12 @@ Examples:
     backend.add_argument("--max-tokens", type=int, default=200)
     backend.add_argument("--concurrent", type=int, default=4,
                          help="Concurrent HTTP requests. Match this to your server's --parallel slot count.")
+    backend.add_argument("--fail-fast-after", type=int, default=20,
+                         help="Abort the run after this many consecutive backend-unreachable errors "
+                              "(scored rows are saved; re-run to resume). Good for a local server that "
+                              "OOMs and won't recover. Set 0 to disable — grind through and leave failed "
+                              "rows for the next run, sensible for a hosted API you expect to self-heal. "
+                              "(default: %(default)s)")
 
     flt = p.add_argument_group("filtering")
     flt.add_argument("--min-overall", type=int, default=3,
@@ -568,10 +637,16 @@ Examples:
     )
 
     t0 = time.time()
-    scores = score_rows_resumable(
-        rows, judge, scores_path=scores_path,
-        concurrent=args.concurrent, show_progress=not args.quiet,
-    )
+    try:
+        scores = score_rows_resumable(
+            rows, judge, scores_path=scores_path,
+            concurrent=args.concurrent, show_progress=not args.quiet,
+            fail_fast_after=args.fail_fast_after,
+        )
+    except BackendUnavailable as e:
+        import sys
+        log(f"\n  ABORTED: {e}")
+        sys.exit(1)
     dt = time.time() - t0
     log(f"\n  wallclock: {dt:.1f}s ({len(rows) / max(dt, 1e-6):.1f} rows/sec)")
 
