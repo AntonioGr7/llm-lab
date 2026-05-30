@@ -277,6 +277,34 @@ Every run writes a JSON scorecard and a markdown twin (the `Scorecard.to_markdow
 
 **Cost:** ~$2–5 on an A100 for the canonical config — evaluation is far cheaper than training. The MC suite is forward-only; the cost is in GSM8K/IFEval generation. Bump `n_per_suite` toward 1000+ for publication-grade CIs (and watch the CI tighten in the scorecard).
 
+### In real life: don't run your own harness — use a standard one
+
+We built this harness from scratch so the failure modes are no longer abstract: you've now *seen* the normalization knob move MMLU by points and the position swap flip a judge verdict. That's the point of the exercise. **In production you should not maintain your own benchmark harness** — you'd be re-deriving a thousand edge-case decisions (prompt templates, answer extraction regexes, few-shot ordering, MC normalization) that the community has already standardized and, crucially, *agreed on* so numbers are comparable across labs.
+
+The de-facto standard is EleutherAI's **`lm-evaluation-harness`** (`lm-eval`) — it backs the Hugging Face Open LLM Leaderboard and most published open-model tables. It ships hundreds of tasks with pinned, peer-reviewed configs, talks to HF / vLLM / OpenAI-compatible endpoints, and reports stderr on every metric.
+
+```bash
+pip install lm-eval
+
+# Score a model on MMLU (5-shot) + GSM8K + IFEval — the same three families
+# you built here, but with the community-pinned task definitions.
+lm_eval --model hf \
+    --model_args pretrained=Qwen/Qwen3-1.7B,dtype=bfloat16 \
+    --tasks mmlu,gsm8k,ifeval \
+    --num_fewshot 5 \
+    --batch_size auto \
+    --output_path results/lm_eval_qwen3_1.7b.json
+
+# vLLM backend for ~10× throughput on the generative tasks:
+lm_eval --model vllm \
+    --model_args pretrained=Qwen/Qwen3-1.7B,dtype=bfloat16,gpu_memory_utilization=0.8 \
+    --tasks gsm8k --batch_size auto
+```
+
+Open one of its task YAMLs (`lm_eval/tasks/mmlu/`) and you'll recognize every knob from this module — `doc_to_text` (the prompt format from §4a), `metric_list` with `acc` vs `acc_norm` (the normalization from §4a), `num_fewshot`, the answer-extraction filter. Seeing those names in *someone else's* config is the real payoff of having built your own: you now know what each one does and why getting it wrong silently changes the number.
+
+Two more worth knowing: **`inspect-ai`** (UK AI Safety Institute) — a modern framework built around agentic and tool-use evals, increasingly the standard for capability/safety evals; and **`OpenAI Evals`** / **HELM** (Stanford) for, respectively, a lightweight registry pattern and a standardized multi-metric leaderboard. Reach for the harness whose task already exists; only hand-roll (with the `metrics.py` / `judge.py` patterns from this module) when you're evaluating something *bespoke to your product* that no public task covers — which, for a real application, is most of what actually matters.
+
 ---
 
 ## 11. Gotchas (the ones that bite in practice)
