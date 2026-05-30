@@ -208,7 +208,7 @@ def main() -> None:
     f4.add_argument("--minhash-threshold", type=float, default=0.85,
                     help="Jaccard threshold above which prompts are near-duplicates")
     f4.add_argument("--skip-dedup", action="store_true")
-    f4.add_argument("--dedup-checkpoint-every", type=int, default=50_000,
+    f4.add_argument("--dedup-checkpoint-every", type=int, default=20_000,
                     help="Stream the stage-4a checkpoint + progress marker every N "
                          "input rows (default: %(default)s). A crash mid-dedup resumes "
                          "from the last marker. Smaller = more durable, more fsyncs.")

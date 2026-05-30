@@ -1,0 +1,49 @@
+# Offline / $0 smoke. Synthetic benchmark data (no HF download), dummy judge
+# (no second model), fp32 so it runs on CPU. Proves the harness wiring end to
+# end in seconds. The numbers are meaningless — this exists to exercise the
+# code path, not to measure a model.
+#
+#   python eval.py --config=configs/eval_demo.yaml --judge
+#
+# Swap model.name to "Qwen/Qwen3-0.6B" and dtype to bf16 on a GPU for a real
+# (tiny, cheap) run.
+
+model:
+  name: "Qwen/Qwen3-0.6B"
+  checkpoint: ""
+  dtype: "fp32"
+  max_seq: 1024
+
+benchmarks:
+  suites: ["mmlu", "gsm8k", "ifeval"]
+  n_per_suite: 8
+  n_shot: 0
+  mc_style: "letters"
+  mc_norm: "token"
+  seed: 0
+
+generation:
+  greedy: true
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 64
+  n_samples: 1
+  system_prompt: ""
+
+judge:
+  backend: "dummy"          # deterministic offline judge
+  model_name: "Qwen/Qwen3-4B"
+  swap: true
+  max_new_tokens: 64
+  pairwise_set: ""
+
+contamination:
+  corpus_glob: ""
+  ngram: 8
+  threshold: 0.5
+
+run:
+  out: "./results/scorecard_demo.json"
+  confidence: 0.95
+  bootstrap_resamples: 2000
+  seed: 0
