@@ -86,7 +86,7 @@ The recipe (Gupta et al. 2023, *"How to re-warm your model?"*; Ibrahim et al. 20
 
 > This one knob — the re-warm peak — *is* your forgetting/adaptation dial. Higher = more adaptation **and** more forgetting. Tuning CPT is mostly tuning this number against the two-axis eval in §"Evaluation."
 
-`schedule.py` is Module 9's scheduler configured for this shape. Note this is the same WSD (warmup-stable-decay) idea from Part 3 — we just start it from a trained model instead of random init.
+`schedule.py` is Module 09's scheduler configured for this shape. Note this is the same WSD (warmup-stable-decay) idea from Part 3 — we just start it from a trained model instead of random init.
 
 ### 3. Synthetic augmentation — store *and* extract
 
@@ -172,7 +172,7 @@ A CPT run is never "good" on one number. You must measure both:
 - **Acquisition** — closed-book QA on a **held-out** slice of domain facts that were *never in training* (`test_qa_holdout.py` enforces this). If you test on facts you trained on, you're measuring memorization, not generalization of the knowledge.
 - **Retention** — a fixed general benchmark suite (MMLU, GSM8K, …) run **before and after**. The delta is your forgetting bill. This is the number you tune the re-warm peak and replay ratio against.
 
-This is also why CPT comes *before* post-training in the pipeline: CPT damages instruction-following, so you re-apply Part 4 afterward. The full sequence is **CPT → SFT (Module 15) → preference optimization (Module 16)**. You internalize knowledge on the base, *then* re-teach behavior.
+This is also why CPT comes *before* post-training in the pipeline: CPT damages instruction-following, so you re-apply Part 4 afterward. The full sequence is **CPT → SFT (Module 15) → preference optimization (Module 17)**. You internalize knowledge on the base, *then* re-teach behavior.
 
 ## When CPT is the wrong tool: RAG and LoRA
 

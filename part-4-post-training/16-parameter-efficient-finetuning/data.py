@@ -1,4 +1,11 @@
-"""Data pipeline for Module 15 — Supervised Fine-Tuning.
+"""Data pipeline for Module 16 — Parameter-Efficient Fine-Tuning (LoRA / QLoRA).
+
+Copied verbatim from Module 15. LoRA changes *which weights* get updated, not
+*what the data looks like*: the chat-template rendering and the assistant-only
+loss mask are identical to full-FT SFT. Nothing in this file is LoRA-aware, and
+that's the point. Original docstring follows.
+
+Data pipeline for Module 15 — Supervised Fine-Tuning.
 
 Two responsibilities, both unique to SFT (this is where the new pedagogical
 content of the module lives):

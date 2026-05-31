@@ -11,7 +11,7 @@ The two new pedagogical ideas in this module:
 
 This module is **full fine-tuning only** — every weight in the model updates. LoRA / QLoRA / DoRA and other parameter-efficient methods are their own module later in Part 4, because the techniques deserve a focused treatment rather than being a "config flag" on top of the full-FT pipeline. Full FT first, parameter-efficient variants once you understand what they're being efficient *about*.
 
-Like Module 11, this is a **framework directory** — lift it out, point it at your own data and base model, you have a working SFT codebase. Modules 16-18 (preference optimization, GRPO, distillation) will all build on this same pipeline rather than starting fresh.
+Like Module 11, this is a **framework directory** — lift it out, point it at your own data and base model, you have a working SFT codebase. Modules 16-19 (LoRA/QLoRA, preference optimization, GRPO, distillation) all build on this same pipeline rather than starting fresh.
 
 ## The thesis
 
@@ -249,4 +249,4 @@ In order of "read this first":
 
 ## 11. What's next
 
-[Module 16 — Preference Optimization](../16-preference-optimization/) — SFT teaches the model *what to say*; preference optimization teaches it *how to choose between things to say*. We layer DPO on top of the SFT checkpoint you produce here.
+[Module 16 — Parameter-Efficient Fine-Tuning (LoRA / QLoRA)](../16-parameter-efficient-finetuning/) — you just fine-tuned every weight in the model. Module 16 does the *same* SFT, but freezes the base and trains a tiny low-rank adapter instead — 95% of the quality for a fraction of the memory and cost, and the technique that makes everything downstream affordable. Then [Module 17 — Preference Optimization](../17-preference-optimization/) layers DPO on top of an SFT checkpoint (full or LoRA): SFT teaches *what to say*; preference optimization teaches *how to choose between things to say*.

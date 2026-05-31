@@ -39,13 +39,13 @@ This course walks you through every stage end-to-end on a small enough model to 
                   │ INSTRUCT MODEL                       │
                   │ Follows instructions. Often bland.   │
                   └──────────────────┬───────────────────┘
-                                     │   DPO  ← Module 16
+                                     │   DPO  ← Module 17
                                      ▼
                   ┌──────────────────────────────────────┐
                   │ ALIGNED MODEL                        │
                   │ Preferred outputs over rejected ones │
                   └──────────────────┬───────────────────┘
-                                     │   GRPO  ← Module 17
+                                     │   GRPO  ← Module 18
                                      ▼
                   ┌──────────────────────────────────────┐
                   │ REASONING MODEL                      │
@@ -88,7 +88,7 @@ We're going to train something tiny. Here's the honest comparison.
 
 The ratio is roughly 1:100,000. **But the code is the same shape.** The training loop you write in Part 3 is, structurally, the same loop DeepSeek wrote. The architectural choices (RoPE, SwiGLU, RMSNorm, GQA, MoE) are the same. The data hygiene principles are the same. The post-training stack is the same.
 
-What changes at scale is engineering — multi-GPU communication, FP8 numerical stability, fault tolerance, checkpointing under hardware failure — not concepts. By Module 21 you'll be able to point at exactly what changes and what doesn't.
+What changes at scale is engineering — multi-GPU communication, FP8 numerical stability, fault tolerance, checkpointing under hardware failure — not concepts. By Module 22 you'll be able to point at exactly what changes and what doesn't.
 
 ## The course philosophy
 
@@ -130,7 +130,7 @@ Two rules that make $50 enough:
 
 **Develop offline, run online.** Every line of code is debugged on CPU with tiny tensors before it ever touches a GPU. The GPU exists to run the experiment, not to iterate on it. This is how researchers actually work. Module 01 will show you the exact workflow.
 
-**Pre-run checkpoints exist.** The expensive runs (the pretraining demo in Module 11, the GRPO run in Module 17) have checkpoints committed to the repo. If you want to run them yourself, great. If you'd rather spend your budget on smaller experiments, also great — you can pick up from any stage.
+**Pre-run checkpoints exist.** The expensive runs (the pretraining demo in Module 11, the GRPO run in Module 18) have checkpoints committed to the repo. If you want to run them yourself, great. If you'd rather spend your budget on smaller experiments, also great — you can pick up from any stage.
 
 The dollar value isn't really the point. The point is that running an experiment intentionally — not by reflex — is a skill that scales. The engineer who knows what experiments to run with a $10M budget is the same engineer who knew what to run with $50.
 

@@ -1,0 +1,51 @@
+# Canonical eval: score the post-trained Qwen3-1.7B (or a checkpoint from
+# Modules 13-18) on the three automatic suites + an LLM-as-judge win rate.
+#
+# This is the "evaluate at each stage" config. Point `model.checkpoint` at a
+# stage's checkpoint to score that stage; leave it empty to score the
+# published base/instruct model. Run it on the BASE, the SFT'd, the DPO'd, and
+# the GRPO'd checkpoints to watch capability climb and read the alignment tax.
+#
+#   ~$2-5 on an A100; most of the cost is GSM8K/IFEval generation. The MC
+#   suite (MMLU) is forward-only and cheap. Bump n_per_suite for tighter CIs
+#   (see metrics.min_n_for_halfwidth — 200 items gives a ~+-7pt CI).
+
+model:
+  name: "Qwen/Qwen3-1.7B"
+  checkpoint: ""            # e.g. ../18-reasoning-and-grpo/results/checkpoints/step_00000300
+  dtype: "bf16"
+  max_seq: 4096
+
+benchmarks:
+  suites: ["mmlu", "gsm8k", "ifeval"]
+  n_per_suite: 200          # raise toward 1000+ for publication-grade CIs
+  n_shot: 5                 # MMLU canonical 5-shot
+  mc_style: "letters"       # try "cloze" to see format sensitivity
+  mc_norm: "token"          # try "raw"/"byte" to see normalization sensitivity
+  seed: 0
+
+generation:
+  greedy: true              # set false + n_samples>1 for pass@k on GSM8K
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 512
+  n_samples: 1
+  system_prompt: ""
+
+judge:
+  backend: "local"          # use a model OUTSIDE the Qwen family for the judge
+  model_name: "Qwen/Qwen3-4B"
+  swap: true                # always position-swap for real evals
+  max_new_tokens: 512
+  pairwise_set: ""          # "" => built-in demo pairs; or a path to your JSONL
+
+contamination:
+  corpus_glob: ""           # e.g. "../../part-3-pretraining/**/*.jsonl" to scan
+  ngram: 13
+  threshold: 0.5
+
+run:
+  out: "./results/scorecard_qwen3_1.7b.json"
+  confidence: 0.95
+  bootstrap_resamples: 10000
+  seed: 0

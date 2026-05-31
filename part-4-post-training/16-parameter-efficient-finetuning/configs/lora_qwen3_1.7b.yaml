@@ -1,0 +1,67 @@
+# Module 16 — LoRA — the canonical demo config.
+#
+# LoRA fine-tune Qwen3-1.7B-Base on HuggingFaceH4/no_robots into an
+# instruction-following model — the SAME task and data as Module 15's full FT,
+# so you can compare them head-to-head (eval the merged model vs M15's run).
+#
+# Hardware:  a single 24GB GPU is plenty (RTX 4090 / A10 / A5000 / one A100).
+#            No activation checkpointing needed — the optimizer state is tiny.
+# Wallclock: ~30-60 min.  Cost: ~$0.50-2 on RunPod / Lambda.
+# Effective batch = bs(4) * grad_accum(16) * world(1) = 64.  Drop grad_accum on
+# multi-GPU to hold it (e.g. --training.grad_accum=2 on 8 GPUs).
+#
+# Everything here is explained in the README: rank/alpha (§3), the higher LR (§5),
+# why AC is off (§6), the merge step (§7).
+
+model:
+  name: Qwen/Qwen3-1.7B-Base
+  max_seq: 2048
+
+data:
+  source: HuggingFaceH4/no_robots
+  split: train
+  seq_len: 2048
+  batch_size_per_device: 4
+  num_workers: 0
+  pin_memory: true
+  seed: 0
+  chat_template_name: auto
+  system_prompt: ""
+  pack: false
+
+lora:
+  r: 8                       # rank of ΔW = B@A; 8-16 is the SFT sweet spot
+  alpha: 16                  # scaling = alpha/r = 2.0 (the common alpha = 2r)
+  dropout: 0.05              # light dropout helps on a 10k-example set
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  qlora: false               # bf16 frozen base (see qlora_qwen3_1.7b.yaml for 4-bit)
+
+optimizer:
+  type: adamw
+  lr: 2.0e-4                 # ~20x higher than full-FT SFT — adapters start at 0 (README §5)
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+schedule:
+  type: cosine
+  warmup_steps: 50
+  min_lr_ratio: 0.1
+
+training:
+  total_steps: 600           # ~3 epochs over 10k examples at eff_batch 64
+  grad_accum: 16
+  grad_clip: 1.0
+  dtype: bf16
+  activation_checkpointing: false   # LoRA fits on 24GB without it (README §6)
+  log_every: 10
+  save_every: 200
+  eval_every: 0
+  checkpoint_dir: ./results/checkpoints
+  keep_last_n_checkpoints: 3
+  milestone_every: 0
+  wandb_project: ""
+  wandb_entity: ""
+  wandb_run_name: ""
+  wandb_run_id: ""
+  wandb_tags: []
