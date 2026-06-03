@@ -95,12 +95,28 @@ class JudgeScore:
 
     @classmethod
     def from_json(cls, blob: str) -> "JudgeScore":
-        """Parse the model's JSON output. Tolerates surrounding markdown fences."""
-        # Strip ```json ... ``` fences if present.
-        m = re.search(r"\{[^{}]*\}", blob, re.DOTALL)
+        """Parse the model's JSON output. Tolerates surrounding markdown fences,
+        prose around the object, and (shallowly) nested braces in the rationale."""
+        if blob is None or not blob.strip():
+            raise ValueError("empty response")
+        # Fast path: the whole thing is already a JSON object (the common case
+        # when response_format=json_object is honored).
+        text = blob.strip()
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return cls._from_dict(data)
+        except json.JSONDecodeError:
+            pass
+        # Fallback: find the first balanced {...} block, allowing nesting.
+        m = re.search(r"\{.*\}", text, re.DOTALL)
         if m is None:
             raise ValueError(f"no JSON object in: {blob!r}")
         data = json.loads(m.group(0))
+        return cls._from_dict(data)
+
+    @classmethod
+    def _from_dict(cls, data: dict) -> "JudgeScore":
         return cls(
             fluency_it=int(data.get("fluency_it", 0)),
             relevance=int(data.get("relevance", 0)),
@@ -233,6 +249,18 @@ class OpenAICompatibleJudge:
         doesn't, it's a no-op (the request still works).
       - On parse failure we return a 0-score with the raw text in ``rationale``,
         so the row is conservatively dropped without crashing the run.
+
+    Reasoning ("thinking") models:
+      The judge wants a terse JSON verdict, NOT a chain of thought. On a
+      reasoning model (Qwen3/Qwen3.5, DeepSeek-R1, etc.) the thinking trace can
+      eat the entire ``max_tokens`` budget and leave the actual ``content`` field
+      EMPTY — every row then parses as malformed and gets dropped, silently
+      destroying your dataset. So by default (``enable_thinking=False``) we send
+      ``chat_template_kwargs={"enable_thinking": False}``, which llama.cpp/vLLM
+      pass to the Qwen chat template to suppress the <think> block. As a belt-and-
+      suspenders measure we also read ``reasoning_content`` as a fallback if
+      ``content`` comes back empty. Set ``enable_thinking=True`` for a hosted API
+      (e.g. OpenAI) that rejects the unknown ``chat_template_kwargs`` field.
     """
 
     def __init__(
@@ -244,6 +272,7 @@ class OpenAICompatibleJudge:
         max_tokens: int = 200,
         temperature: float = 0.0,
         retries: int = 2,
+        enable_thinking: bool = False,
     ):
         # Normalize endpoint — accept both "http://host:8080" and "http://host:8080/v1".
         ep = endpoint.rstrip("/")
@@ -256,6 +285,7 @@ class OpenAICompatibleJudge:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.retries = retries
+        self.enable_thinking = enable_thinking
 
     def _post(self, payload: dict) -> dict:
         data = json.dumps(payload).encode("utf-8")
@@ -290,12 +320,22 @@ class OpenAICompatibleJudge:
             # by some others. Cheap to ask, big win when supported.
             "response_format": {"type": "json_object"},
         }
+        if not self.enable_thinking:
+            # Suppress the <think> block on reasoning models (Qwen3/Qwen3.5,
+            # etc.). Without this, the thinking trace consumes max_tokens and
+            # `content` comes back empty. llama.cpp / vLLM forward this to the
+            # chat template; hosted APIs without the field just need
+            # enable_thinking=True to omit it.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         last_err: Optional[Exception] = None
         for attempt in range(self.retries + 1):
             try:
                 resp = self._post(payload)
-                completion = resp["choices"][0]["message"]["content"]
+                msg = resp["choices"][0]["message"]
+                # Prefer the real answer; fall back to the reasoning channel if a
+                # thinking model left `content` empty despite our request.
+                completion = msg.get("content") or msg.get("reasoning_content") or ""
                 return JudgeScore.from_json(completion)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
                 last_err = e
@@ -585,6 +625,11 @@ Examples:
     backend.add_argument("--max-tokens", type=int, default=200)
     backend.add_argument("--concurrent", type=int, default=4,
                          help="Concurrent HTTP requests. Match this to your server's --parallel slot count.")
+    backend.add_argument("--enable-thinking", action="store_true",
+                         help="Allow the model's <think> reasoning block. Default OFF: on a reasoning "
+                              "model (Qwen3/Qwen3.5, R1...) the thinking trace eats max_tokens and leaves "
+                              "an EMPTY response, dropping every row. Leave off for local reasoning models; "
+                              "turn on only for a hosted API that rejects chat_template_kwargs.")
     backend.add_argument("--fail-fast-after", type=int, default=20,
                          help="Abort the run after this many consecutive backend-unreachable errors "
                               "(scored rows are saved; re-run to resume). Good for a local server that "
@@ -634,6 +679,7 @@ Examples:
         timeout=args.timeout,
         max_tokens=args.max_tokens,
         retries=args.retries,
+        enable_thinking=args.enable_thinking,
     )
 
     t0 = time.time()

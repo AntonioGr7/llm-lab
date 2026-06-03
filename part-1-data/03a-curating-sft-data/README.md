@@ -155,6 +155,8 @@ Outputs:
 
 **Concurrency tip.** Set `--concurrent` to match the server's `--parallel`. If the client sends 8 concurrent requests but the server only has 4 slots, the extra 4 queue server-side — no harm, just no benefit. Setting client concurrency *lower* than server slots wastes throughput.
 
+**Reasoning ("thinking") models.** If you serve a reasoning model (Qwen3 / Qwen3.5, DeepSeek-R1, etc.), the judge **disables the `<think>` block by default** — it sends `chat_template_kwargs={"enable_thinking": false}`. This is not optional cosmetics: with thinking on, the model spends the entire `--max-tokens` budget reasoning and returns an *empty* answer, which parses as malformed and silently drops every row. You want a terse JSON verdict here, not a chain of thought. If you point `--endpoint` at a hosted API that rejects the `chat_template_kwargs` field (plain OpenAI), pass `--enable-thinking` to omit it. The judge also reads the `reasoning_content` channel as a fallback if `content` ever comes back empty.
+
 #### Other backends
 
 - **vLLM's OpenAI server**: works identically. Run `vllm serve <model>` and point `--endpoint` at it.
